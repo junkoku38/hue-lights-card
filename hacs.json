@@ -1,0 +1,6 @@
+{
+  "name": "Hue Lights Card",
+  "render_readme": true,
+  "filename": "hue-lights-card.js",
+  "homeassistant": "2024.2.0"
+}
