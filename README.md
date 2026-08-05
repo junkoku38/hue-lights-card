@@ -4,6 +4,38 @@ Carte Lovelace pour lumières Philips Hue (et compatibles) dans Home Assistant.
 Pièces en dégradé façon application Hue, scènes réelles découvertes dans HA,
 sélecteur de couleur multi-lampes et garde-fous contre les appuis accidentels.
 
+## Aperçu
+
+### Grille des pièces
+
+![Grille](images/01-grille.png)
+
+Chaque vignette prend les couleurs réelles des lampes allumées (dégradé
+bleu + rouge, pas une moyenne). Le commutateur bascule toute la pièce, le
+glissement horizontal règle l'intensité.
+
+### Vue pièce — scènes et lampes
+
+![Pièce](images/02-piece.png)
+
+Scènes découvertes dans Home Assistant, curseur d'intensité de la pièce,
+et liste des lampes avec leurs commutateurs individuels. Les groupes Hue
+sont aplatis en ampoules membres.
+
+### Sélecteur de couleur multi-lampes
+
+![Couleur](images/03-couleur.png)
+
+Roue HSV + mode blanc (Kelvin), sélection multiple des lampes. Le curseur
+garde sa position après le clic, et les contrôles non supportés (switch,
+on/off only) sont masqués.
+
+### Bandeau d'annulation
+
+![Bandeau](images/00-bandeau.png)
+
+Restaure l'état exact de chaque lampe après un bascuule accidentel.
+
 ## Fonctionnalités
 
 - **Découverte automatique** des lumières, regroupées par pièce (area)
