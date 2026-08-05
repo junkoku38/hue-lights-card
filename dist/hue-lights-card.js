@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.4.7
+ * Hue Lights Card v2.4.8
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.4.7";
+const CARD_VERSION = "2.4.8";
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -401,9 +401,10 @@ class HueLightsCard extends HTMLElement {
         isSwitch: id.startsWith("switch."),
         isGroup,
         members: isGroup ? st.attributes.entity_id : null,
-        dimmable: !id.startsWith("switch.") && st.attributes?.brightness != null
-          || (Array.isArray(st.attributes?.supported_color_modes) &&
-              st.attributes.supported_color_modes.some(m => ["brightness","dimmer","hs","rgb","rgbw","rgbww","xy","color_temp"].includes(m))),
+        dimmable: !id.startsWith("switch.") && (
+          Array.isArray(st.attributes?.supported_color_modes) &&
+          st.attributes.supported_color_modes.some(m => ["brightness","dimmer","hs","rgb","rgbw","rgbww","xy","color_temp"].includes(m))
+        ),
         colorable: !id.startsWith("switch.") && (Array.isArray(st.attributes?.hs_color) ||
           Array.isArray(st.attributes?.rgb_color) ||
           (Array.isArray(st.attributes?.supported_color_modes) &&
@@ -441,9 +442,8 @@ class HueLightsCard extends HTMLElement {
                 isSwitch: false,
                 isGroup: false,
                 members: null,
-                dimmable: mst.attributes?.brightness != null
-                  || (Array.isArray(mst.attributes?.supported_color_modes) &&
-                      mst.attributes.supported_color_modes.some(m2 => ["brightness","dimmer","hs","rgb","rgbw","rgbww","xy","color_temp"].includes(m2))),
+                dimmable: Array.isArray(mst.attributes?.supported_color_modes) &&
+                  mst.attributes.supported_color_modes.some(m2 => ["brightness","dimmer","hs","rgb","rgbw","rgbww","xy","color_temp"].includes(m2)),
                 colorable: Array.isArray(mst.attributes?.hs_color) ||
                   Array.isArray(mst.attributes?.rgb_color) ||
                   (Array.isArray(mst.attributes?.supported_color_modes) &&
@@ -605,18 +605,19 @@ class HueLightsCard extends HTMLElement {
 
   _setBrightness(ids, pct) {
     if (!ids.length) return;
-    /* Sépare les entités dimmables des non-dimmables (switchs, on/off only) */
+    /* Sépare les entités dimmables des non-dimmables (switchs, on/off only).
+       On utilise le flag dimmable précalculé dans _rooms() si disponible,
+       car l'attribut brightness peut être absent quand la lampe est éteinte. */
     const dimmable = [];
     const onOffOnly = [];
     for (const id of ids) {
-      const st = this._hass.states[id];
-      const reg = this._hass.entities?.[id];
       const isSwitch = id.startsWith("switch.");
-      const hasBrightness = st?.attributes?.brightness != null;
+      if (isSwitch) { onOffOnly.push(id); continue; }
+      const st = this._hass.states[id];
       const hasColorModes = Array.isArray(st?.attributes?.supported_color_modes) &&
         st.attributes.supported_color_modes.some(m => ["brightness","dimmer","hs","rgb","rgbw","rgbww","xy","color_temp"].includes(m));
-      if (isSwitch || (!hasBrightness && !hasColorModes)) onOffOnly.push(id);
-      else dimmable.push(id);
+      if (hasColorModes) dimmable.push(id);
+      else onOffOnly.push(id);
     }
     if (pct <= 0) {
       this._turn(ids, false);
