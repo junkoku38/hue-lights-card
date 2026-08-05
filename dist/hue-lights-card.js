@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.3.0
+ * Hue Lights Card v2.3.1
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.3.0";
+const CARD_VERSION = "2.3.1";
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -394,6 +394,18 @@ class HueLightsCard extends HTMLElement {
             ? 100
             : 0,
         color: lightColor(st),
+        /* Capacités déduites du domaine et des color modes supportés */
+        isSwitch: id.startsWith("switch."),
+        dimmable: !id.startsWith("switch.") && st.attributes?.brightness != null
+          || (Array.isArray(st.attributes?.supported_color_modes) &&
+              st.attributes.supported_color_modes.some(m => ["brightness","dimmer","hs","rgb","rgbw","rgbww","xy","color_temp"].includes(m))),
+        colorable: !id.startsWith("switch.") && (Array.isArray(st.attributes?.hs_color) ||
+          Array.isArray(st.attributes?.rgb_color) ||
+          (Array.isArray(st.attributes?.supported_color_modes) &&
+           st.attributes.supported_color_modes.some(m => ["hs","rgb","rgbw","rgbww","xy"].includes(m)))),
+        kelvinable: !id.startsWith("switch.") && (st.attributes?.color_temp_kelvin != null ||
+          (Array.isArray(st.attributes?.supported_color_modes) &&
+           st.attributes.supported_color_modes.includes("color_temp"))),
       });
     });
 
@@ -549,22 +561,54 @@ class HueLightsCard extends HTMLElement {
 
   _setBrightness(ids, pct) {
     if (!ids.length) return;
-    const { lights, switches } = this._splitByDomain(ids);
+    /* Sépare les entités dimmables des non-dimmables (switchs, on/off only) */
+    const dimmable = [];
+    const onOffOnly = [];
+    for (const id of ids) {
+      const st = this._hass.states[id];
+      const reg = this._hass.entities?.[id];
+      const isSwitch = id.startsWith("switch.");
+      const hasBrightness = st?.attributes?.brightness != null;
+      const hasColorModes = Array.isArray(st?.attributes?.supported_color_modes) &&
+        st.attributes.supported_color_modes.some(m => ["brightness","dimmer","hs","rgb","rgbw","rgbww","xy","color_temp"].includes(m));
+      if (isSwitch || (!hasBrightness && !hasColorModes)) onOffOnly.push(id);
+      else dimmable.push(id);
+    }
     if (pct <= 0) {
       this._turn(ids, false);
       return;
     }
-    if (lights.length)
-      this._hass.callService("light", "turn_on", { entity_id: lights, brightness_pct: Math.round(pct) });
-    if (switches.length)
-      this._hass.callService("switch", "turn_on", { entity_id: switches });
+    if (dimmable.length)
+      this._hass.callService("light", "turn_on", { entity_id: dimmable, brightness_pct: Math.round(pct) });
+    if (onOffOnly.length)
+      this._turn(onOffOnly, true);
   }
 
   _setColor(ids, payload) {
     if (!ids.length) return;
-    const { lights, switches } = this._splitByDomain(ids);
-    if (lights.length) this._hass.callService("light", "turn_on", { entity_id: lights, ...payload });
-    if (switches.length) this._hass.callService("switch", "turn_on", { entity_id: switches });
+    /* Ne garde que les entités qui supportent la couleur/kelvin */
+    const colorable = ids.filter((id) => {
+      if (id.startsWith("switch.")) return false;
+      const st = this._hass.states[id];
+      if (!st) return false;
+      if (payload.hs_color) {
+        return Array.isArray(st.attributes?.hs_color) ||
+          Array.isArray(st.attributes?.rgb_color) ||
+          (Array.isArray(st.attributes?.supported_color_modes) &&
+           st.attributes.supported_color_modes.some(m => ["hs","rgb","rgbw","rgbww","xy"].includes(m)));
+      }
+      if (payload.color_temp_kelvin) {
+        return st.attributes?.color_temp_kelvin != null ||
+          (Array.isArray(st.attributes?.supported_color_modes) &&
+           st.attributes.supported_color_modes.includes("color_temp"));
+      }
+      return true;
+    });
+    const nonColor = ids.filter((id) => !colorable.includes(id));
+    if (colorable.length)
+      this._hass.callService("light", "turn_on", { entity_id: colorable, ...payload });
+    if (nonColor.length)
+      this._turn(nonColor, true);
   }
 
   _allOff() {
@@ -916,8 +960,10 @@ class HueLightsCard extends HTMLElement {
             <div class="rname">${esc(room.name)}</div>
             <div class="sw ${room.on ? "on" : ""}" data-rsw="1"><i></i></div>
           </div>
-          <div class="rslider"><div class="rfill" style="width:${room.pct}%"></div>
-            <div class="rknob" style="left:${room.pct}%"></div></div>
+          ${room.lights.some((l) => l.dimmable)
+            ? `<div class="rslider"><div class="rfill" style="width:${room.pct}%"></div>
+               <div class="rknob" style="left:${room.pct}%"></div></div>`
+            : ""}
         </div>
       </div>
 
@@ -952,7 +998,7 @@ class HueLightsCard extends HTMLElement {
 
       <div class="rsec rowsec"><span>Lumières</span>
         ${
-          c.show_color_picker
+          c.show_color_picker && room.lights.some((l) => l.colorable || l.kelvinable)
             ? `<span class="pill2" data-group="1">Couleur du groupe</span>`
             : ""
         }
@@ -984,29 +1030,31 @@ class HueLightsCard extends HTMLElement {
       .querySelector("[data-rsw]")
       .addEventListener("click", () => this._toggleRoom(room));
 
-    /* curseur d'intensité de la pièce */
+    /* curseur d'intensité de la pièce (seulement si des lampes sont dimmables) */
     const sl = host.querySelector(".rslider");
-    const setFromX = (cx) => {
-      const b = sl.getBoundingClientRect();
-      const v = clamp(((cx - b.left) / b.width) * 100, 0, 100);
-      host.querySelector(".rfill").style.width = `${v}%`;
-      host.querySelector(".rknob").style.left = `${v}%`;
-      return Math.round(v);
-    };
-    let sliding = false;
-    sl.addEventListener("pointerdown", (e) => {
-      sl.setPointerCapture(e.pointerId);
-      sliding = true;
-      this._interacting = true;
-      setFromX(e.clientX);
-    });
-    sl.addEventListener("pointermove", (e) => sliding && setFromX(e.clientX));
-    sl.addEventListener("pointerup", (e) => {
-      sliding = false;
-      this._interacting = false;
-      const v = setFromX(e.clientX);
-      this._setBrightness(room.on ? room.onIds : room.ids, v);
-    });
+    if (sl) {
+      const setFromX = (cx) => {
+        const b = sl.getBoundingClientRect();
+        const v = clamp(((cx - b.left) / b.width) * 100, 0, 100);
+        host.querySelector(".rfill").style.width = `${v}%`;
+        host.querySelector(".rknob").style.left = `${v}%`;
+        return Math.round(v);
+      };
+      let sliding = false;
+      sl.addEventListener("pointerdown", (e) => {
+        sl.setPointerCapture(e.pointerId);
+        sliding = true;
+        this._interacting = true;
+        setFromX(e.clientX);
+      });
+      sl.addEventListener("pointermove", (e) => sliding && setFromX(e.clientX));
+      sl.addEventListener("pointerup", (e) => {
+        sliding = false;
+        this._interacting = false;
+        const v = setFromX(e.clientX);
+        this._setBrightness(room.on ? room.onIds : room.ids, v);
+      });
+    }
 
     host.querySelectorAll(".scn").forEach((el) =>
       el.addEventListener("click", () => {
@@ -1104,6 +1152,10 @@ class HueLightsCard extends HTMLElement {
     const [kLo, kHi] = this._kelvinRange(sel);
     const avg = Math.round(sel.reduce((a, b) => a + b.pct, 0) / sel.length) || 100;
     const allSel = sel.length === room.lights.length;
+    /* Capacités de la sélection */
+    const anyColorable = sel.some((l) => l.colorable || l.kelvinable);
+    const anyDimmable = sel.some((l) => l.dimmable);
+    const hasKelvin = sel.some((l) => l.kelvinable);
 
     host.innerHTML = `
       <div class="cptop">
@@ -1118,24 +1170,24 @@ class HueLightsCard extends HTMLElement {
       <div class="cptitle">${
         sel.length === 1 ? esc(ref.name) : `${sel.length} lampes sélectionnées`
       }</div>
-      <div class="wheelw">
+      ${anyColorable ? `<div class="wheelw">
         <div class="wheel ${mode}"></div>
         <div class="dots"></div>
         <div class="pin"><svg viewBox="0 0 38 46">
           <path d="M19 46C19 46 36 26.5 36 17A17 17 0 1 0 2 17C2 26.5 19 46 19 46Z" fill="${ref.color}"/>
         </svg><div class="pi"><svg viewBox="0 0 24 24">${ICONS.bulb}</svg></div></div>
-      </div>
+      </div>` : `<div class="cp-no-color">Aucune lampe de la sélection ne supporte la couleur.</div>`}
       <div class="cpmodes">
         <div class="mchips">
-          <div class="mc rainbow ${mode === "color" ? "on" : ""}" data-m="color"></div>
-          <div class="mc white ${mode === "white" ? "on" : ""}" data-m="white"></div>
+          ${anyColorable ? `<div class="mc rainbow ${mode === "color" ? "on" : ""}" data-m="color"></div>` : ""}
+          ${hasKelvin ? `<div class="mc white ${mode === "white" ? "on" : ""}" data-m="white"></div>` : ""}
           <div class="mc fx" data-m="fx"><svg viewBox="0 0 24 24">${ICONS.spark}</svg></div>
         </div>
-        <div class="cpbr">
+        ${anyDimmable ? `<div class="cpbr">
           <div class="cpbrv">${avg} %</div>
           <div class="cpbrs"><div class="cpbrf" style="width:${avg}%"></div>
             <svg viewBox="0 0 24 24" style="stroke:#12151c">${ICONS.sun}</svg></div>
-        </div>
+        </div>` : ""}
       </div>
       <div class="cpsel"><span class="cpsl">Appliquer à</span>
         <span class="pill2 ${allSel ? "on" : ""}" data-all="1">Toutes les lampes</span></div>
@@ -1196,96 +1248,99 @@ class HueLightsCard extends HTMLElement {
       })
     );
 
-    /* roue */
+    /* roue (seulement si des lampes sont colorables) */
     const ww = host.querySelector(".wheelw");
-    const pin = host.querySelector(".pin");
-    const dots = host.querySelector(".dots");
-    const R = () => ww.clientWidth / 2;
-    const pos = (h, s) => {
-      const a = (h * Math.PI) / 180;
-      const rad = s * R() * 0.94;
-      return [R() + rad * Math.cos(a), R() + rad * Math.sin(a)];
-    };
-    let curH = initH;
-    let curS = initS;
-    const place = () => {
-      const [x, y] = pos(curH, curS);
-      pin.style.left = `${x}px`;
-      pin.style.top = `${y}px`;
-      const col =
-        mode === "white"
-          ? mixWhite(kelvinToRgb(hueToKelvin(curH, kLo, kHi)), 1 - curS)
-          : rgbStr(hsvToRgb(curH, curS, 1));
-      pin.querySelector("path").setAttribute("fill", col);
-      dots.innerHTML = room.lights
-        .filter((l) => l.on && l.id !== ref.id)
-        .map((l) => {
-          const [h2, s2] = this._lightHS(l);
-          const [dx, dy] = pos(h2, s2);
-          return `<div class="dot ${this._sel.has(l.id) ? "sel" : ""}"
-            style="left:${dx}px;top:${dy}px;background:${l.color}"></div>`;
-        })
-        .join("");
-    };
-    place();
-
-    const apply = (cx, cy, commit) => {
-      const b = ww.getBoundingClientRect();
-      const r0 = b.width / 2;
-      const dx = cx - b.left - r0;
-      const dy = cy - b.top - r0;
-      const dist = Math.min(r0 * 0.94, Math.hypot(dx, dy));
-      curH = ((Math.atan2(dy, dx) * 180) / Math.PI + 360) % 360;
-      curS = dist / (r0 * 0.94);
+    if (ww) {
+      const pin = host.querySelector(".pin");
+      const dots = host.querySelector(".dots");
+      const R = () => ww.clientWidth / 2;
+      const pos = (h, s) => {
+        const a = (h * Math.PI) / 180;
+        const rad = s * R() * 0.94;
+        return [R() + rad * Math.cos(a), R() + rad * Math.sin(a)];
+      };
+      let curH = initH;
+      let curS = initS;
+      const place = () => {
+        const [x, y] = pos(curH, curS);
+        pin.style.left = `${x}px`;
+        pin.style.top = `${y}px`;
+        const col =
+          mode === "white"
+            ? mixWhite(kelvinToRgb(hueToKelvin(curH, kLo, kHi)), 1 - curS)
+            : rgbStr(hsvToRgb(curH, curS, 1));
+        pin.querySelector("path").setAttribute("fill", col);
+        dots.innerHTML = room.lights
+          .filter((l) => l.on && l.id !== ref.id && (l.colorable || l.kelvinable))
+          .map((l) => {
+            const [h2, s2] = this._lightHS(l);
+            const [dx, dy] = pos(h2, s2);
+            return `<div class="dot ${this._sel.has(l.id) ? "sel" : ""}"
+              style="left:${dx}px;top:${dy}px;background:${l.color}"></div>`;
+          })
+          .join("");
+      };
       place();
-      /* Mémorise la position du curseur pour qu'un re-render ne la perde pas. */
-      this._lastColor = { h: curH, s: curS };
-      this._lastColorKey = lastColorKey;
-      if (!commit) return;
-      const ids = [...this._sel];
-      if (mode === "white")
-        this._setColor(ids, { color_temp_kelvin: hueToKelvin(curH, kLo, kHi) });
-      else
-        this._setColor(ids, {
-          hs_color: [Math.round(curH), Math.round(curS * 100)],
-        });
-    };
-    let drag = false;
-    ww.addEventListener("pointerdown", (e) => {
-      ww.setPointerCapture(e.pointerId);
-      drag = true;
-      this._interacting = true;
-      apply(e.clientX, e.clientY, false);
-    });
-    ww.addEventListener("pointermove", (e) => drag && apply(e.clientX, e.clientY, false));
-    ww.addEventListener("pointerup", (e) => {
-      drag = false;
-      this._interacting = false;
-      apply(e.clientX, e.clientY, true);
-    });
 
-    /* intensité */
+      const apply = (cx, cy, commit) => {
+        const b = ww.getBoundingClientRect();
+        const r0 = b.width / 2;
+        const dx = cx - b.left - r0;
+        const dy = cy - b.top - r0;
+        const dist = Math.min(r0 * 0.94, Math.hypot(dx, dy));
+        curH = ((Math.atan2(dy, dx) * 180) / Math.PI + 360) % 360;
+        curS = dist / (r0 * 0.94);
+        place();
+        this._lastColor = { h: curH, s: curS };
+        this._lastColorKey = lastColorKey;
+        if (!commit) return;
+        const ids = [...this._sel];
+        if (mode === "white")
+          this._setColor(ids, { color_temp_kelvin: hueToKelvin(curH, kLo, kHi) });
+        else
+          this._setColor(ids, {
+            hs_color: [Math.round(curH), Math.round(curS * 100)],
+          });
+      };
+      let drag = false;
+      ww.addEventListener("pointerdown", (e) => {
+        ww.setPointerCapture(e.pointerId);
+        drag = true;
+        this._interacting = true;
+        apply(e.clientX, e.clientY, false);
+      });
+      ww.addEventListener("pointermove", (e) => drag && apply(e.clientX, e.clientY, false));
+      ww.addEventListener("pointerup", (e) => {
+        drag = false;
+        this._interacting = false;
+        apply(e.clientX, e.clientY, true);
+      });
+    }
+
+    /* intensité (seulement si des lampes sont dimmables) */
     const bs = host.querySelector(".cpbrs");
-    const setB = (cx) => {
-      const b = bs.getBoundingClientRect();
-      const v = clamp(Math.round(((cx - b.left) / b.width) * 100), 1, 100);
-      host.querySelector(".cpbrf").style.width = `${v}%`;
-      host.querySelector(".cpbrv").textContent = `${v} %`;
-      return v;
-    };
-    let bd = false;
-    bs.addEventListener("pointerdown", (e) => {
-      bs.setPointerCapture(e.pointerId);
-      bd = true;
-      this._interacting = true;
-      setB(e.clientX);
-    });
-    bs.addEventListener("pointermove", (e) => bd && setB(e.clientX));
-    bs.addEventListener("pointerup", (e) => {
-      bd = false;
-      this._interacting = false;
-      this._setBrightness([...this._sel], setB(e.clientX));
-    });
+    if (bs) {
+      const setB = (cx) => {
+        const b = bs.getBoundingClientRect();
+        const v = clamp(Math.round(((cx - b.left) / b.width) * 100), 1, 100);
+        host.querySelector(".cpbrf").style.width = `${v}%`;
+        host.querySelector(".cpbrv").textContent = `${v} %`;
+        return v;
+      };
+      let bd = false;
+      bs.addEventListener("pointerdown", (e) => {
+        bs.setPointerCapture(e.pointerId);
+        bd = true;
+        this._interacting = true;
+        setB(e.clientX);
+      });
+      bs.addEventListener("pointermove", (e) => bd && setB(e.clientX));
+      bs.addEventListener("pointerup", (e) => {
+        bd = false;
+        this._interacting = false;
+        this._setBrightness([...this._sel], setB(e.clientX));
+      });
+    }
   }
 
   /* ---------------- Boîte d'enregistrement ---------------- */
@@ -1551,6 +1606,9 @@ ha-card.transparent{
 .mc.fx svg{width:16px;height:16px;fill:#fff;}
 .cpbr{margin-left:auto;text-align:right;}
 .cpbrv{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;}
+.cp-no-color{padding:40px 20px;text-align:center;color:rgba(255,255,255,.4);
+  font-size:13px;background:rgba(255,255,255,.04);border-radius:18px;margin:18px auto;
+  max-width:270px;}
 .cpbrs{position:relative;width:104px;height:34px;border-radius:18px;margin-top:6px;
   background:rgba(255,255,255,.12);overflow:hidden;cursor:pointer;touch-action:none;}
 .cpbrf{position:absolute;left:0;top:0;bottom:0;background:rgba(255,255,255,.55);}
