@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.5.7
+ * Hue Lights Card v2.5.8
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.5.7";;
+const CARD_VERSION = "2.5.8";;
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -936,6 +936,8 @@ class HueLightsCard extends HTMLElement {
       /* Désactive le drag si aucune lampe de la pièce n'est dimmable */
       const flat = room.flatLights || room.lights;
       if (!flat.some((l) => l.dimmable)) return;
+      /* En mode rows, le slider a son propre handler direct */
+      if (el.classList.contains("rw")) return;
       let delta = null;
       const sl = el.querySelector(".sl");
       const dragWidth = sl ? sl.clientWidth - 28 : el.getBoundingClientRect().width;
@@ -1002,6 +1004,62 @@ class HueLightsCard extends HTMLElement {
       armed = false;
       this._interacting = false;
     });
+
+    /* Slider direct en mode rows : handler propre, sans garde-fous */
+    const slEl = el.querySelector(".sl");
+    if (slEl) {
+      let slDrag = false;
+      const slPaint = (v) => {
+        const p = Math.round(v);
+        const fl2 = slEl.querySelector(".fl");
+        const kn2 = slEl.querySelector(".kn");
+        if (fl2) fl2.style.width = `${p}%`;
+        if (kn2) kn2.style.left = `${p}%`;
+        const hv2 = el.querySelector(".hv");
+        if (hv2) hv2.textContent = p;
+      };
+      const slFromX = (cx) => {
+        const b = slEl.getBoundingClientRect();
+        const v = clamp(((cx - b.left - 14) / (b.width - 28)) * 100, 0, 100);
+        return v;
+      };
+      slEl.addEventListener("pointerdown", (e) => {
+        e.stopPropagation();
+        slEl.setPointerCapture(e.pointerId);
+        slDrag = true;
+        this._interacting = true;
+        el.classList.add("drag");
+        const v = slFromX(e.clientX);
+        slPaint(v);
+        pct = v;
+        sp = v;
+      });
+      slEl.addEventListener("pointermove", (e) => {
+        if (!slDrag) return;
+        const v = slFromX(e.clientX);
+        slPaint(v);
+        pct = v;
+      });
+      slEl.addEventListener("pointerup", (e) => {
+        if (!slDrag) return;
+        slDrag = false;
+        this._interacting = false;
+        el.classList.remove("drag");
+        const v = Math.round(slFromX(e.clientX));
+        slPaint(v);
+        this._pending.set(room.key, v);
+        setTimeout(() => {
+          this._pending.delete(room.key);
+          this._sig = "";
+        }, 2500);
+        this._setBrightness(room.on ? room.onIds : room.ids, v);
+      });
+      slEl.addEventListener("pointercancel", () => {
+        slDrag = false;
+        this._interacting = false;
+        el.classList.remove("drag");
+      });
+    }
   }
 
   /* ---------------- Vue 2 : pièce ---------------- */
@@ -1590,7 +1648,7 @@ ha-card.transparent{
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .rw .tx span{display:block;font-size:10.5px;color:rgba(255,255,255,.62);margin-top:2px;}
 .rw.off .tx b{color:rgba(255,255,255,.62);}
-.rw .sl{position:relative;padding:0 14px;margin-top:10px;pointer-events:none;}
+.rw .sl{position:relative;padding:0 14px;margin-top:10px;touch-action:none;cursor:pointer;}
 .rw .tk{position:relative;height:4px;border-radius:2px;background:rgba(255,255,255,.18);}
 .rw.off .tk{background:rgba(255,255,255,.06);}
 .rw .fl{position:absolute;left:0;top:0;bottom:0;border-radius:2px;
