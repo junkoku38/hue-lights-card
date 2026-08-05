@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.6.0
+ * Hue Lights Card v2.6.1
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.6.0";;;;
+const CARD_VERSION = "2.6.1";;;;;
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -215,7 +215,7 @@ class HueLightsCard extends HTMLElement {
     if (!this._watch || n !== this._watchCount) {
       this._watchCount = n;
       this._watch = Object.keys(hass.states).filter(
-        (id) => id.startsWith("light.") || id.startsWith("scene.")
+        (id) => id.startsWith("light.") || id.startsWith("scene.") || id.startsWith("switch.")
       );
       this._lastRefs = new Map();
     }
@@ -725,7 +725,7 @@ class HueLightsCard extends HTMLElement {
       this._sceneColors[`scene.${slug}`] = fresh.colors.slice(0, 3);
       saveSceneColors(this._sceneColors);
     }
-    this._showUndo(`Scène « ${esc(name)} » enregistrée`, null);
+    this._showUndo(`Scène « ${name} » enregistrée`, null);
   }
 
   /* ================= Annulation ================= */
@@ -775,6 +775,7 @@ class HueLightsCard extends HTMLElement {
   }
 
   _go(view, roomKey) {
+    if (view !== "color") this._mode = null;
     this._view = view;
     if (roomKey !== undefined) this._roomKey = roomKey;
     this._sig = "";
@@ -1332,7 +1333,8 @@ class HueLightsCard extends HTMLElement {
     const avg = Math.round(sel.reduce((a, b) => a + b.pct, 0) / sel.length) || 100;
     const allSel = sel.length === lights.length;
     /* Capacités de la sélection */
-    const anyColorable = sel.some((l) => l.colorable || l.kelvinable);
+    const anyRgb = sel.some((l) => l.colorable);
+    const anyColorable = anyRgb || sel.some((l) => l.kelvinable);
     const anyDimmable = sel.some((l) => l.dimmable);
     const hasKelvin = sel.some((l) => l.kelvinable);
 
@@ -1358,7 +1360,7 @@ class HueLightsCard extends HTMLElement {
       </div>` : `<div class="cp-no-color">Aucune lampe de la sélection ne supporte la couleur.</div>`}
       <div class="cpmodes">
         <div class="mchips">
-          ${anyColorable ? `<div class="mc rainbow ${mode === "color" ? "on" : ""}" data-m="color"></div>` : ""}
+          ${anyRgb ? `<div class="mc rainbow ${mode === "color" ? "on" : ""}" data-m="color"></div>` : ""}
           ${hasKelvin ? `<div class="mc white ${mode === "white" ? "on" : ""}" data-m="white"></div>` : ""}
           <div class="mc fx" data-m="fx"><svg viewBox="0 0 24 24">${ICONS.spark}</svg></div>
         </div>
@@ -1734,13 +1736,14 @@ ha-card.transparent{
 .scn .dyn{display:block;font-style:normal;font-size:8px;letter-spacing:.6px;
   text-transform:uppercase;color:rgba(255,255,255,.3);margin-top:3px;}
 .lights{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;}
-.lt{position:relative;border-radius:15px;overflow:hidden;height:132px;cursor:pointer;
-  transition:transform .12s;}
+.lt{position:relative;border-radius:15px;min-height:132px;height:auto;cursor:pointer;
+  transition:transform .12s;
+  clip-path:inset(0 round 15px);}
 .lt:active{transform:scale(.98);}
 .ltbg,.ltov{position:absolute;inset:0;}
 .lt .scrim{position:absolute;inset:0;pointer-events:none;
   background:linear-gradient(to bottom,rgba(8,9,12,0) 40%,rgba(8,9,12,.5) 100%);}
-.ltct{position:relative;height:100%;display:flex;flex-direction:column;
+.ltct{position:relative;min-height:132px;height:auto;display:flex;flex-direction:column;
   justify-content:space-between;padding:13px 13px 0;}
 .ltic svg{width:24px;height:24px;fill:rgba(255,255,255,.95);
   filter:drop-shadow(0 1px 4px rgba(0,0,0,.4));}
@@ -1748,20 +1751,6 @@ ha-card.transparent{
 .ltn{font-size:12.5px;font-weight:600;line-height:1.3;
   text-shadow:0 1px 4px rgba(0,0,0,.45);}
 .ltn small{font-size:10px;font-weight:400;opacity:.55;}
-.grp-badge{position:absolute;top:9px;left:9px;width:20px;height:20px;
-  background:rgba(0,0,0,.35);border-radius:50%;display:flex;align-items:center;
-  justify-content:center;z-index:2;pointer-events:none;}
-.grp-badge svg{width:14px;height:14px;fill:rgba(255,255,255,.8);}
-.lt.is-group{border:1px solid rgba(255,255,255,.12);}
-.grp-members{grid-column:1/-1;display:grid;grid-template-columns:repeat(2,1fr);
-  gap:6px;padding:0 4px 8px 24px;}
-.lt-sub{height:96px !important;border-radius:12px;}
-.lt-sub .ltic svg{width:18px;height:18px;}
-.lt-sub .ltn{font-size:11px;}
-.lt-sub .ltsw{transform:scale(.82);}
-.grp-members:empty{display:none;}
-.lt.off .grp-badge svg{fill:rgba(255,255,255,.35);}
-  text-shadow:0 1px 4px rgba(0,0,0,.45);}
 .lt.off .ltn{color:rgba(255,255,255,.55);}
 .ltbar{margin:10px -13px 0;padding:10px 13px 12px;
   border-top:1px solid rgba(255,255,255,.16);}
@@ -1885,6 +1874,9 @@ class HueLightsCardEditor extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
+    this.shadowRoot?.querySelectorAll("ha-entity-picker")
+      .forEach((p) => { p.hass = hass; });
+    this._sync();
   }
 
   _set(k, v) {
@@ -2015,7 +2007,7 @@ class HueLightsCardEditor extends HTMLElement {
           <div class="sws">
             <div class="row" data-k="group_by_area"><div class="sw"><i></i></div>
               <div class="tx"><b>Regrouper par pièce</b>
-                <span>Sinon chaque lampe est sa propre tuige.</span></div></div>
+                <span>Sinon chaque lampe est sa propre tuile.</span></div></div>
           </div></div>
 
         <div class="grp"><label class="lb">Exclure <small>motifs séparés par des virgules</small></label>
