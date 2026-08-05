@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.5.9
+ * Hue Lights Card v2.6.0
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.5.9";;;
+const CARD_VERSION = "2.6.0";;;;
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -337,7 +337,7 @@ class HueLightsCard extends HTMLElement {
 
   /* ================= Découverte ================= */
 
-  _rooms() {
+  _computeRooms() {
     const c = this._config;
     const hass = this._hass;
     const exPat = c.exclude.map(norm);
@@ -530,6 +530,13 @@ class HueLightsCard extends HTMLElement {
 
   _room(key) {
     return this._rooms().find((r) => r.key === key) || null;
+  }
+
+  _rooms() {
+    if (this._roomsCache && this._roomsCacheHass === this._hass) return this._roomsCache;
+    this._roomsCache = this._computeRooms();
+    this._roomsCacheHass = this._hass;
+    return this._roomsCache;
   }
 
   _gradient(room) {
@@ -780,13 +787,22 @@ class HueLightsCard extends HTMLElement {
   _update() {
     if (!this._hass || !this._built || this._interacting) return;
     if (this._visible === false) return;
+    /* Differe le rendu au prochain frame pour eviter le lag */
+    if (this._raf) cancelAnimationFrame(this._raf);
+    this._raf = requestAnimationFrame(() => {
+      this._raf = null;
+      this._doUpdate();
+    });
+  }
+
+  _doUpdate() {
     const rooms = this._rooms();
     let sig = `${this._view}|${this._roomKey}|${[...this._sel].join()}|${this._config.layout}${this._config.columns}`;
     sig += rooms
       .map((r) => `${r.key}:${r.on}:${r.pct}:${r.colors.join()}`)
       .join("|");
     if (this._view !== "grid") {
-      const room = this._room(this._roomKey);
+      const room = rooms.find((r) => r.key === this._roomKey) || null;
       if (room) sig += "|" + this._scenes(room).map((s) => s.id + (s.colors || "")).join();
     }
     if (sig === this._sig) return;
