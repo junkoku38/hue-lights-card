@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.4.6
+ * Hue Lights Card v2.4.7
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.4.6";
+const CARD_VERSION = "2.4.7";
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -798,6 +798,8 @@ class HueLightsCard extends HTMLElement {
       ? `${r.on} lumière${r.on > 1 ? "s" : ""} · ${r.pct} %`
       : `${r.total} lumière${r.total > 1 ? "s" : ""} · éteinte${r.total > 1 ? "s" : ""}`;
     if (c.layout === "rows") {
+      const flat = r.flatLights || r.lights;
+      const hasDim = flat.some((l) => l.dimmable);
       return `<div class="rw ${r.on ? "on" : "off"}" data-k="${esc(r.key)}">
         <div class="bg" style="background:${grad}"></div>
         <div class="ov" style="background:rgba(8,9,12,${Math.max(dim, lum).toFixed(2)})"></div>
@@ -807,8 +809,8 @@ class HueLightsCard extends HTMLElement {
           <div class="tx"><b>${nameE}</b><span>${esc(sub)}</span></div>
           <div class="sw ${r.on ? "on" : ""}" data-sw="1"><i></i></div>
         </div>
-        <div class="sl"><div class="tk"><div class="fl" style="width:${r.pct}%"></div>
-          <div class="kn" style="left:${r.pct}%"></div></div></div>
+        ${hasDim ? `<div class="sl"><div class="tk"><div class="fl" style="width:${r.pct}%"></div>
+          <div class="kn" style="left:${r.pct}%"></div></div></div>` : ""}
         <div class="hud"><span class="hv">${r.pct}</span><small>%</small></div>
       </div>`;
     }
@@ -1551,7 +1553,7 @@ ha-card.transparent{
 .tl.off .bot span{color:rgba(255,255,255,.28);}
 
 /* ---- barres ---- */
-.rw{position:relative;height:76px;border-radius:16px;overflow:hidden;
+.rw{position:relative;height:84px;border-radius:16px;overflow:hidden;
   touch-action:pan-y;user-select:none;-webkit-user-select:none;transition:transform .12s;}
 .rw.drag{transform:scale(1.01);box-shadow:0 8px 26px rgba(0,0,0,.5);z-index:2;}
 .rw.armed{box-shadow:0 0 0 2px rgba(255,255,255,.55);}
@@ -1572,7 +1574,7 @@ ha-card.transparent{
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .rw .tx span{display:block;font-size:10.5px;color:rgba(255,255,255,.62);margin-top:2px;}
 .rw.off .tx b{color:rgba(255,255,255,.62);}
-.rw .sl{position:relative;padding:0 14px;margin-top:14px;pointer-events:none;}
+.rw .sl{position:relative;padding:0 14px;margin-top:10px;pointer-events:none;}
 .rw .tk{position:relative;height:4px;border-radius:2px;background:rgba(255,255,255,.18);}
 .rw.off .tk{background:rgba(255,255,255,.06);}
 .rw .fl{position:absolute;left:0;top:0;bottom:0;border-radius:2px;
