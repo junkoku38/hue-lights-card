@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.1.0
+ * Hue Lights Card v2.1.1
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.1.0";
+const CARD_VERSION = "2.1.1";
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -1040,6 +1040,14 @@ class HueLightsCard extends HTMLElement {
     }
     const ref = sel[0];
     const [rh, rs, rmode] = this._lightHS(ref);
+    /* Si on vient de sélectionner une couleur sur la roue, on garde la
+       position du curseur au lieu de revenir à l'état brut de la lampe
+       (qui peut différer à cause de l'arrondi hs_color ou de la latence HA). */
+    const lastColorKey = [...this._sel].sort().join(",");
+    const last = this._lastColor && this._lastColorKey === lastColorKey
+      ? this._lastColor : null;
+    const initH = last ? last.h : rh;
+    const initS = last ? last.s : rs;
     const mode = this._mode || rmode;
     const [kLo, kHi] = this._kelvinRange(sel);
     const avg = Math.round(sel.reduce((a, b) => a + b.pct, 0) / sel.length) || 100;
@@ -1146,8 +1154,8 @@ class HueLightsCard extends HTMLElement {
       const rad = s * R() * 0.94;
       return [R() + rad * Math.cos(a), R() + rad * Math.sin(a)];
     };
-    let curH = rh;
-    let curS = rs;
+    let curH = initH;
+    let curS = initS;
     const place = () => {
       const [x, y] = pos(curH, curS);
       pin.style.left = `${x}px`;
@@ -1178,6 +1186,9 @@ class HueLightsCard extends HTMLElement {
       curH = ((Math.atan2(dy, dx) * 180) / Math.PI + 360) % 360;
       curS = dist / (r0 * 0.94);
       place();
+      /* Mémorise la position du curseur pour qu'un re-render ne la perde pas. */
+      this._lastColor = { h: curH, s: curS };
+      this._lastColorKey = lastColorKey;
       if (!commit) return;
       const ids = [...this._sel];
       if (mode === "white")
