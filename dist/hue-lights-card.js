@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.5.2
+ * Hue Lights Card v2.5.3
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.5.2";;
+const CARD_VERSION = "2.5.3";;
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -1543,7 +1543,7 @@ ha-card.transparent{
 .tl.drag{transform:scale(1.02);box-shadow:0 8px 26px rgba(0,0,0,.5);z-index:2;}
 .tl.armed{box-shadow:0 0 0 2px rgba(255,255,255,.55),0 8px 26px rgba(0,0,0,.5);}
 .tl.off{box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);}
-.tl .bg{position:absolute;inset:0;}
+.tl .bg{position:absolute;inset:0;border-radius:17px;}
 .tl .scrim{position:absolute;inset:0;pointer-events:none;
   background:linear-gradient(to bottom,rgba(8,9,12,0) 35%,rgba(8,9,12,.45) 70%,rgba(8,9,12,.72) 100%);
   opacity:0;transition:opacity .2s;}
@@ -1571,7 +1571,7 @@ ha-card.transparent{
 .rw.drag{transform:scale(1.01);box-shadow:0 8px 26px rgba(0,0,0,.5);z-index:2;}
 .rw.armed{box-shadow:0 0 0 2px rgba(255,255,255,.55);}
 .rw.off{box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);}
-.rw .bg,.rw .ov{position:absolute;inset:0;}
+.rw .bg,.rw .ov{position:absolute;inset:0;border-radius:16px;}
 .rw .scrim{position:absolute;inset:0;pointer-events:none;
   background:linear-gradient(to right,rgba(8,9,12,.45) 0%,rgba(8,9,12,.15) 40%,rgba(8,9,12,.45) 100%);
   opacity:0;transition:opacity .2s;}
