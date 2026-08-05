@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.4.1
+ * Hue Lights Card v2.4.2
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.4.1";
+const CARD_VERSION = "2.4.2";
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -1015,23 +1015,7 @@ class HueLightsCard extends HTMLElement {
       </div>
       <div class="lights">${room.lights
         .map((l) => {
-          const d = l.on ? Math.max(0, 1 - (l.pct / 100) * 0.8) : 0;
-          const groupBadge = l.isGroup
-            ? `<div class="grp-badge"><svg viewBox="0 0 24 24"><path d="M12 2a7 7 0 0 0-4 12.7V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.3A7 7 0 0 0 12 2zm-2 19h4v.5a1.5 1.5 0 0 1-1.5 1.5h-1A1.5 1.5 0 0 1 10 21.5V21z" fill="currentColor"/><circle cx="6" cy="8" r="1.5" fill="currentColor" opacity=".5"/><circle cx="18" cy="8" r="1.5" fill="currentColor" opacity=".5"/><circle cx="5" cy="14" r="1.2" fill="currentColor" opacity=".4"/><circle cx="19" cy="14" r="1.2" fill="currentColor" opacity=".4"/></svg></div>`
-            : "";
-          let html = `<div class="lt ${l.on ? "on" : "off"} ${l.isGroup ? "is-group" : ""}" data-l="${esc(l.id)}">
-            <div class="ltbg" style="background:${l.on ? l.color : "#2a2e36"}"></div>
-            <div class="ltov" style="background:rgba(8,9,12,${d.toFixed(2)})"></div>
-            <div class="scrim" style="opacity:${l.on ? this._dim({colors:[l.color],on:true}).toFixed(2) : 0}"></div>
-            ${groupBadge}
-            <div class="ltct">
-              <div class="ltic"><svg viewBox="0 0 24 24">${ICONS.bulb}</svg></div>
-              <div class="ltn">${esc(l.name)}${l.isGroup ? ` <small>${l.members.length}</small>` : ""}</div>
-              <div class="ltbar"><div class="ltsw ${l.on ? "on" : ""}" data-lsw="${
-            esc(l.id)
-          }"><i></i></div></div>
-            </div></div>`;
-          /* Sous-vignettes des membres d'un groupe */
+          /* Un groupe est remplacé par ses membres directement */
           if (l.isGroup && l.members) {
             const memLights = l.members
               .map((mid) => {
@@ -1042,9 +1026,9 @@ class HueLightsCard extends HTMLElement {
               })
               .filter(Boolean);
             if (memLights.length) {
-              html += `<div class="grp-members">${memLights.map((m) => {
+              return memLights.map((m) => {
                 const mColor = m.mst.state === "on" ? lightColor(m.mst) : "#2a2e36";
-                return `<div class="lt lt-sub ${m.mst.state === "on" ? "on" : "off"}" data-l="${esc(m.mid)}">
+                return `<div class="lt ${m.mst.state === "on" ? "on" : "off"}" data-l="${esc(m.mid)}">
                   <div class="ltbg" style="background:${mColor}"></div>
                   <div class="ltov" style="background:rgba(8,9,12,${m.md.toFixed(2)})"></div>
                   <div class="scrim" style="opacity:${m.mst.state === "on" ? this._dim({colors:[mColor],on:true}).toFixed(2) : 0}"></div>
@@ -1053,10 +1037,21 @@ class HueLightsCard extends HTMLElement {
                     <div class="ltn">${esc(m.mst.attributes?.friendly_name || m.mid)}</div>
                     <div class="ltbar"><div class="ltsw ${m.mst.state === "on" ? "on" : ""}" data-lsw="${esc(m.mid)}"><i></i></div></div>
                   </div></div>`;
-              }).join("")}</div>`;
+              }).join("");
             }
           }
-          return html;
+          const d = l.on ? Math.max(0, 1 - (l.pct / 100) * 0.8) : 0;
+          return `<div class="lt ${l.on ? "on" : "off"}" data-l="${esc(l.id)}">
+            <div class="ltbg" style="background:${l.on ? l.color : "#2a2e36"}"></div>
+            <div class="ltov" style="background:rgba(8,9,12,${d.toFixed(2)})"></div>
+            <div class="scrim" style="opacity:${l.on ? this._dim({colors:[l.color],on:true}).toFixed(2) : 0}"></div>
+            <div class="ltct">
+              <div class="ltic"><svg viewBox="0 0 24 24">${ICONS.bulb}</svg></div>
+              <div class="ltn">${esc(l.name)}</div>
+              <div class="ltbar"><div class="ltsw ${l.on ? "on" : ""}" data-lsw="${
+            esc(l.id)
+          }"><i></i></div></div>
+            </div></div>`;
         })
         .join("")}</div>`;
 
