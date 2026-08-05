@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.6.2
+ * Hue Lights Card v2.6.3
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.6.2";;;;;;
+const CARD_VERSION = "2.6.3";
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -200,15 +200,19 @@ class HueLightsCard extends HTMLElement {
     this._undo = null;
     this._undoTimer = null;
     this._sceneColors = loadSceneColors();
-    this._watch = null;      // identifiants surveillés : lumières et scènes
+    this._watch = null;      // identifiants surveillés : lumières, prises et scènes
     this._watchCount = 0;    // taille du registre au dernier balayage
     this._lastRefs = new Map();
+    this._roomsCache = null;
+    this._roomsCacheHass = null;
+    this._raf = null;
   }
 
   /**
    * Le setter hass est appelé à chaque changement d'état de l'installation.
-   * On ne fait le travail que si une lumière ou une scène a réellement bougé,
-   * ce qui évite de parcourir tout le registre plusieurs fois par seconde.
+   * On ne fait le travail que si une lumière, une prise ou une scène a
+   * réellement bougé, ce qui évite de parcourir tout le registre plusieurs
+   * fois par seconde.
    */
   _relevantChanged(hass) {
     const n = Object.keys(hass.states).length;
@@ -252,7 +256,7 @@ class HueLightsCard extends HTMLElement {
       layout: "tiles", // tiles | rows
       columns: 2,
       sort: "auto", // auto | manual
-      order: null, // liste d'entity_id dans l'ordre souhaite (manual)
+      order: null, // liste d'entity_id dans l'ordre souhaité (manual)
       show_header: true,
       show_off: true,
       show_unassigned: false,
@@ -279,11 +283,9 @@ class HueLightsCard extends HTMLElement {
       exclude: [],
       areas: null,
       /* sélection explicite : liste d'entity_id à afficher.
-         Si fourni, la découverte automatique est ignorée.
-         Les lumières sont regroupées par pièce comme d'habitude. */
+         Si fourni, la découverte automatique est ignorée. */
       entities: null,
-      /* Si true, chaque lumière est sa propre "pièce" (pas de regroupement).
-         Utile avec `entities` pour afficher des lampes éparses sans pièce commune. */
+      /* Si false, chaque lumière est sa propre tuile (pas de regroupement). */
       group_by_area: true,
       ...(config || {}),
     };
@@ -297,6 +299,7 @@ class HueLightsCard extends HTMLElement {
     this._built = false;
     this._view = "grid";
     this._sig = "";
+    this._roomsCache = null;
     if (this.shadowRoot) this.shadowRoot.innerHTML = "";
   }
 
@@ -322,6 +325,10 @@ class HueLightsCard extends HTMLElement {
   disconnectedCallback() {
     this._io?.disconnect();
     this._io = null;
+    /* un rendu programmé ne doit pas s'exécuter sur un shadow root vidé */
+    if (this._raf) cancelAnimationFrame(this._raf);
+    this._raf = null;
+    clearTimeout(this._undoTimer);
   }
 
   set hass(hass) {
@@ -333,6 +340,14 @@ class HueLightsCard extends HTMLElement {
     if (!first && !changed && !this._dirty) return;
     this._dirty = false;
     this._update();
+  }
+
+  /** Invalide le cache de pièces et force un rendu au prochain cycle. */
+  _invalidate() {
+    this._roomsCache = null;
+    this._roomsCacheHass = null;
+    this._sig = "";
+    this._dirty = true;
   }
 
   /* ================= Découverte ================= */
@@ -356,6 +371,29 @@ class HueLightsCard extends HTMLElement {
       ? candidateIds
       : Object.keys(hass.states).filter((id) => id.startsWith("light."));
 
+    const caps = (st, id) => {
+      const modes = Array.isArray(st.attributes?.supported_color_modes)
+        ? st.attributes.supported_color_modes
+        : [];
+      const isSwitch = id.startsWith("switch.");
+      return {
+        isSwitch,
+        dimmable:
+          !isSwitch &&
+          modes.some((m) =>
+            ["brightness", "dimmer", "hs", "rgb", "rgbw", "rgbww", "xy", "color_temp"].includes(m)
+          ),
+        colorable:
+          !isSwitch &&
+          (Array.isArray(st.attributes?.hs_color) ||
+            Array.isArray(st.attributes?.rgb_color) ||
+            modes.some((m) => ["hs", "rgb", "rgbw", "rgbww", "xy"].includes(m))),
+        kelvinable:
+          !isSwitch &&
+          (st.attributes?.color_temp_kelvin != null || modes.includes("color_temp")),
+      };
+    };
+
     sourceIds.forEach((id) => {
       const st = hass.states[id];
       if (!st || st.state === "unavailable") return;
@@ -372,21 +410,27 @@ class HueLightsCard extends HTMLElement {
         const an = norm(areaName || "");
         if (!areaFilter.includes(norm(areaId || "")) && !areaFilter.includes(an)) return;
       }
-      /* Clé de regroupement : area si group_by_area, sinon l'id (1 lampe = 1 "pièce") */
-      const key = c.group_by_area ? (areaId || (candidateIds ? null : "__none__")) : `e:${id}`;
-      if (key === null && candidateIds) {
-        /* sans pièce + group_by_area true en mode manuel : groupe "Sans pièce" */
-      }
-      const gKey = key || "__none__";
+
+      /* Clé de regroupement : la pièce si group_by_area, sinon l'entité elle-même */
+      const gKey = c.group_by_area ? areaId || "__none__" : `e:${id}`;
       if (!rooms.has(gKey)) {
         const gName = !c.group_by_area
-          ? (st.attributes?.friendly_name || id)
-          : (areaName || "Sans pièce");
-        rooms.set(gKey, { key: gKey, areaId: c.group_by_area ? areaId : null, name: gName, lights: [] });
+          ? st.attributes?.friendly_name || id
+          : areaName || "Sans pièce";
+        rooms.set(gKey, {
+          key: gKey,
+          areaId: c.group_by_area ? areaId : null,
+          name: gName,
+          lights: [],
+        });
       }
-      const isGroup = !id.startsWith("switch.") && Array.isArray(st.attributes?.entity_id)
-        && st.attributes.entity_id.length > 0
-        && st.attributes.entity_id.every((m) => m.startsWith("light."));
+
+      const isGroup =
+        !id.startsWith("switch.") &&
+        Array.isArray(st.attributes?.entity_id) &&
+        st.attributes.entity_id.length > 0 &&
+        st.attributes.entity_id.every((m) => m.startsWith("light."));
+
       rooms.get(gKey).lights.push({
         id,
         st,
@@ -399,71 +443,52 @@ class HueLightsCard extends HTMLElement {
             ? 100
             : 0,
         color: lightColor(st),
-        /* Capacités déduites du domaine et des color modes supportés */
-        isSwitch: id.startsWith("switch."),
         isGroup,
         members: isGroup ? st.attributes.entity_id : null,
-        dimmable: !id.startsWith("switch.") && (
-          Array.isArray(st.attributes?.supported_color_modes) &&
-          st.attributes.supported_color_modes.some(m => ["brightness","dimmer","hs","rgb","rgbw","rgbww","xy","color_temp"].includes(m))
-        ),
-        colorable: !id.startsWith("switch.") && (Array.isArray(st.attributes?.hs_color) ||
-          Array.isArray(st.attributes?.rgb_color) ||
-          (Array.isArray(st.attributes?.supported_color_modes) &&
-           st.attributes.supported_color_modes.some(m => ["hs","rgb","rgbw","rgbww","xy"].includes(m)))),
-        kelvinable: !id.startsWith("switch.") && (st.attributes?.color_temp_kelvin != null ||
-          (Array.isArray(st.attributes?.supported_color_modes) &&
-           st.attributes.supported_color_modes.includes("color_temp"))),
+        ...caps(st, id),
       });
     });
 
     return [...rooms.values()]
       .map((r) => {
         const on = r.lights.filter((l) => l.on);
-        const pct = on.length
-          ? Math.round(on.reduce((a, b) => a + b.pct, 0) / on.length)
-          : 0;
-        const colors = on.map((l) => l.color);
-        while (colors.length && colors.length < 3) colors.push(colors[colors.length - 1]);
-        /* Aplatir les membres : si une lampe est un groupe, on utilise
-           ses membres à la place pour ids/onIds (commander les ampoules réelles). */
+        /* Aplatir les groupes : on pilote les ampoules réelles, pas l'entité groupe. */
         const flatLights = r.lights.flatMap((l) => {
           if (l.isGroup && l.members) {
-            return l.members.map((mid) => {
-              const mst = this._hass.states[mid];
-              if (!mst || mst.state === "unavailable") return null;
-              return {
-                id: mid,
-                st: mst,
-                name: mst.attributes?.friendly_name || mid,
-                on: mst.state === "on",
-                pct: mst.attributes?.brightness != null
-                  ? Math.round((mst.attributes.brightness / 255) * 100)
-                  : mst.state === "on" ? 100 : 0,
-                color: lightColor(mst),
-                isSwitch: false,
-                isGroup: false,
-                members: null,
-                dimmable: Array.isArray(mst.attributes?.supported_color_modes) &&
-                  mst.attributes.supported_color_modes.some(m2 => ["brightness","dimmer","hs","rgb","rgbw","rgbww","xy","color_temp"].includes(m2)),
-                colorable: Array.isArray(mst.attributes?.hs_color) ||
-                  Array.isArray(mst.attributes?.rgb_color) ||
-                  (Array.isArray(mst.attributes?.supported_color_modes) &&
-                   mst.attributes.supported_color_modes.some(m2 => ["hs","rgb","rgbw","rgbww","xy"].includes(m2))),
-                kelvinable: mst.attributes?.color_temp_kelvin != null ||
-                  (Array.isArray(mst.attributes?.supported_color_modes) &&
-                   mst.attributes.supported_color_modes.includes("color_temp")),
-              };
-            }).filter(Boolean);
+            return l.members
+              .map((mid) => {
+                const mst = hass.states[mid];
+                if (!mst || mst.state === "unavailable") return null;
+                return {
+                  id: mid,
+                  st: mst,
+                  name: mst.attributes?.friendly_name || mid,
+                  on: mst.state === "on",
+                  pct:
+                    mst.attributes?.brightness != null
+                      ? Math.round((mst.attributes.brightness / 255) * 100)
+                      : mst.state === "on"
+                      ? 100
+                      : 0,
+                  color: lightColor(mst),
+                  isGroup: false,
+                  members: null,
+                  ...caps(mst, mid),
+                };
+              })
+              .filter(Boolean);
           }
           return [l];
         });
         const flatOn = flatLights.filter((l) => l.on);
+        const pct = flatOn.length
+          ? Math.round(flatOn.reduce((a, b) => a + b.pct, 0) / flatOn.length)
+          : 0;
         const flatColors = flatOn.map((l) => l.color);
-        while (flatColors.length && flatColors.length < 3) flatColors.push(flatColors[flatColors.length - 1]);
+        while (flatColors.length && flatColors.length < 3)
+          flatColors.push(flatColors[flatColors.length - 1]);
         return {
           ...r,
-          lights: r.lights,
           flatLights,
           on: on.length,
           total: r.lights.length,
@@ -483,6 +508,17 @@ class HueLightsCard extends HTMLElement {
         }
         return b.on - a.on || a.name.localeCompare(b.name);
       });
+  }
+
+  _rooms() {
+    if (this._roomsCache && this._roomsCacheHass === this._hass) return this._roomsCache;
+    this._roomsCache = this._computeRooms();
+    this._roomsCacheHass = this._hass;
+    return this._roomsCache;
+  }
+
+  _room(key) {
+    return this._rooms().find((r) => r.key === key) || null;
   }
 
   /** Scènes rattachées à une pièce, par trois critères cumulables. */
@@ -519,24 +555,13 @@ class HueLightsCard extends HTMLElement {
         name: st.attributes?.friendly_name || id.split(".")[1],
         dynamic: !!st.attributes?.is_dynamic,
         colors: this._sceneColors[id] || null,
-        last: (st.state && st.state !== "unknown") ? (new Date(st.state).getTime() || 0) : 0,
+        last: st.state && st.state !== "unknown" ? new Date(st.state).getTime() || 0 : 0,
       });
     });
 
     return out
       .sort((a, b) => b.last - a.last || a.name.localeCompare(b.name))
       .slice(0, c.max_scenes);
-  }
-
-  _room(key) {
-    return this._rooms().find((r) => r.key === key) || null;
-  }
-
-  _rooms() {
-    if (this._roomsCache && this._roomsCacheHass === this._hass) return this._roomsCache;
-    this._roomsCache = this._computeRooms();
-    this._roomsCacheHass = this._hass;
-    return this._roomsCache;
   }
 
   _gradient(room) {
@@ -546,14 +571,14 @@ class HueLightsCard extends HTMLElement {
   }
 
   /** Luminance perçue (0-1) d'une chaîne rgb(). */
-  _luminance(rgbStr) {
-    const m = rgbStr.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+  _luminance(col) {
+    const m = String(col).match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
     if (!m) return 0;
     const [r, g, b] = [m[1], m[2], m[3]].map(Number);
     return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
   }
 
-  /** Overlay sombre selon la luminance : plus la couleur est claire, plus on assombrit. */
+  /** Voile sombre selon la luminance : plus la couleur est claire, plus on assombrit. */
   _dim(room) {
     if (!room.on || !room.colors.length) return 0;
     const avg = room.colors.reduce((a, c) => a + this._luminance(c), 0) / room.colors.length;
@@ -573,17 +598,21 @@ class HueLightsCard extends HTMLElement {
     return { lights, switches };
   }
 
-  /** Allume/éteint un mélange de light.* et switch.* */
+  /** Allume ou éteint un mélange de light.* et switch.* */
   _turn(ids, on) {
     const { lights, switches } = this._splitByDomain(ids);
-    if (lights.length) this._hass.callService("light", on ? "turn_on" : "turn_off", { entity_id: lights });
-    if (switches.length) this._hass.callService("switch", on ? "turn_on" : "turn_off", { entity_id: switches });
+    if (lights.length)
+      this._hass.callService("light", on ? "turn_on" : "turn_off", { entity_id: lights });
+    if (switches.length)
+      this._hass.callService("switch", on ? "turn_on" : "turn_off", { entity_id: switches });
+    this._invalidate();
   }
 
   _toggle(ids) {
     const { lights, switches } = this._splitByDomain(ids);
     if (lights.length) this._hass.callService("light", "toggle", { entity_id: lights });
     if (switches.length) this._hass.callService("switch", "toggle", { entity_id: switches });
+    this._invalidate();
   }
 
   _snapshot(ids) {
@@ -591,10 +620,10 @@ class HueLightsCard extends HTMLElement {
       const st = this._hass.states[id];
       return {
         id,
-        state: st.state,
-        brightness: st.attributes?.brightness,
-        hs_color: st.attributes?.hs_color,
-        color_temp_kelvin: st.attributes?.color_temp_kelvin,
+        state: st?.state,
+        brightness: st?.attributes?.brightness,
+        hs_color: st?.attributes?.hs_color,
+        color_temp_kelvin: st?.attributes?.color_temp_kelvin,
       };
     });
   }
@@ -605,14 +634,17 @@ class HueLightsCard extends HTMLElement {
         this._turn([s.id], false);
         return;
       }
-      const isSwitch = s.id.startsWith("switch.");
-      if (isSwitch) { this._turn([s.id], true); return; }
+      if (s.id.startsWith("switch.")) {
+        this._turn([s.id], true);
+        return;
+      }
       const data = { entity_id: s.id };
       if (s.brightness != null) data.brightness = s.brightness;
       if (s.hs_color) data.hs_color = s.hs_color;
       else if (s.color_temp_kelvin) data.color_temp_kelvin = s.color_temp_kelvin;
       this._hass.callService("light", "turn_on", data);
     });
+    this._invalidate();
   }
 
   _toggleRoom(room) {
@@ -621,20 +653,30 @@ class HueLightsCard extends HTMLElement {
     this._showUndo(`${room.name} ${room.on ? "éteinte" : "allumée"}`, () => this._restore(snap));
   }
 
+  /**
+   * Règle l'intensité. Les entités qui ne savent pas varier — prises et lampes
+   * tout ou rien — sont simplement allumées. Les capacités sont relues depuis
+   * hass.states, car l'attribut brightness est absent quand la lampe est éteinte.
+   */
   _setBrightness(ids, pct) {
     if (!ids.length) return;
-    /* Sépare les entités dimmables des non-dimmables (switchs, on/off only).
-       On utilise le flag dimmable précalculé dans _rooms() si disponible,
-       car l'attribut brightness peut être absent quand la lampe est éteinte. */
     const dimmable = [];
     const onOffOnly = [];
     for (const id of ids) {
-      const isSwitch = id.startsWith("switch.");
-      if (isSwitch) { onOffOnly.push(id); continue; }
+      if (id.startsWith("switch.")) {
+        onOffOnly.push(id);
+        continue;
+      }
       const st = this._hass.states[id];
-      const hasColorModes = Array.isArray(st?.attributes?.supported_color_modes) &&
-        st.attributes.supported_color_modes.some(m => ["brightness","dimmer","hs","rgb","rgbw","rgbww","xy","color_temp"].includes(m));
-      if (hasColorModes) dimmable.push(id);
+      const modes = Array.isArray(st?.attributes?.supported_color_modes)
+        ? st.attributes.supported_color_modes
+        : [];
+      if (
+        modes.some((m) =>
+          ["brightness", "dimmer", "hs", "rgb", "rgbw", "rgbww", "xy", "color_temp"].includes(m)
+        )
+      )
+        dimmable.push(id);
       else onOffOnly.push(id);
     }
     if (pct <= 0) {
@@ -642,36 +684,38 @@ class HueLightsCard extends HTMLElement {
       return;
     }
     if (dimmable.length)
-      this._hass.callService("light", "turn_on", { entity_id: dimmable, brightness_pct: Math.round(pct) });
-    if (onOffOnly.length)
-      this._turn(onOffOnly, true);
+      this._hass.callService("light", "turn_on", {
+        entity_id: dimmable,
+        brightness_pct: Math.round(pct),
+      });
+    if (onOffOnly.length) this._turn(onOffOnly, true);
+    this._invalidate();
   }
 
   _setColor(ids, payload) {
     if (!ids.length) return;
-    /* Ne garde que les entités qui supportent la couleur/kelvin */
     const colorable = ids.filter((id) => {
       if (id.startsWith("switch.")) return false;
       const st = this._hass.states[id];
       if (!st) return false;
-      if (payload.hs_color) {
-        return Array.isArray(st.attributes?.hs_color) ||
+      const modes = Array.isArray(st.attributes?.supported_color_modes)
+        ? st.attributes.supported_color_modes
+        : [];
+      if (payload.hs_color)
+        return (
+          Array.isArray(st.attributes?.hs_color) ||
           Array.isArray(st.attributes?.rgb_color) ||
-          (Array.isArray(st.attributes?.supported_color_modes) &&
-           st.attributes.supported_color_modes.some(m => ["hs","rgb","rgbw","rgbww","xy"].includes(m)));
-      }
-      if (payload.color_temp_kelvin) {
-        return st.attributes?.color_temp_kelvin != null ||
-          (Array.isArray(st.attributes?.supported_color_modes) &&
-           st.attributes.supported_color_modes.includes("color_temp"));
-      }
+          modes.some((m) => ["hs", "rgb", "rgbw", "rgbww", "xy"].includes(m))
+        );
+      if (payload.color_temp_kelvin)
+        return st.attributes?.color_temp_kelvin != null || modes.includes("color_temp");
       return true;
     });
     const nonColor = ids.filter((id) => !colorable.includes(id));
     if (colorable.length)
       this._hass.callService("light", "turn_on", { entity_id: colorable, ...payload });
-    if (nonColor.length)
-      this._turn(nonColor, true);
+    if (nonColor.length) this._turn(nonColor, true);
+    this._invalidate();
   }
 
   _allOff() {
@@ -686,15 +730,13 @@ class HueLightsCard extends HTMLElement {
   _activateScene(scene, room) {
     const c = this._config;
     if (scene.dynamic && this._hass.services?.hue?.activate_scene) {
-      this._hass.callService("hue", "activate_scene", {
-        entity_id: scene.id,
-        dynamic: true,
-      });
+      this._hass.callService("hue", "activate_scene", { entity_id: scene.id, dynamic: true });
     } else {
       const data = { entity_id: scene.id };
       if (c.scene_transition) data.transition = c.scene_transition;
       this._hass.callService("scene", "turn_on", data);
     }
+    this._invalidate();
     if (c.learn_scene_colors) this._learnSceneColors(scene, room);
   }
 
@@ -702,20 +744,21 @@ class HueLightsCard extends HTMLElement {
   _learnSceneColors(scene, room) {
     const delay = (this._config.scene_transition || 1) * 1000 + 900;
     setTimeout(() => {
+      if (!this.isConnected || !this._hass) return;
+      this._invalidate();
       const fresh = this._room(room.key);
       if (!fresh || !fresh.on) return;
       this._sceneColors[scene.id] = fresh.colors.slice(0, 3);
       saveSceneColors(this._sceneColors);
-      this._sig = "";
-      this._dirty = true;
       this._update();
     }, delay);
   }
 
   _createScene(room, name) {
     const slug =
-      norm(name).replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") ||
-      `scene_${Date.now().toString(36)}`;
+      norm(name)
+        .replace(/[^a-z0-9]+/g, "_")
+        .replace(/^_|_$/g, "") || `scene_${Date.now().toString(36)}`;
     this._hass.callService("scene", "create", {
       scene_id: slug,
       snapshot_entities: room.ids,
@@ -758,7 +801,7 @@ class HueLightsCard extends HTMLElement {
   /* ================= Construction ================= */
 
   _build() {
-    const tr = this._config.transparent ? " transparent" : "";
+    const tr = this._config.transparent ? "transparent" : "";
     this.shadowRoot.innerHTML = `<style>${HueLightsCard.styles}</style>
       <ha-card class="${tr}">
         <div class="view"></div>
@@ -767,19 +810,23 @@ class HueLightsCard extends HTMLElement {
       </ha-card>`;
     this._built = true;
     this._view = "grid";
-    const t = this.shadowRoot.querySelector(".toast .tu");
-    t.addEventListener("click", () => {
+    this.shadowRoot.querySelector(".toast .tu").addEventListener("click", () => {
       if (this._undo) this._undo();
       this._hideUndo();
     });
   }
 
   _go(view, roomKey) {
-    if (view !== "color") this._mode = null;
+    /* le mode couleur et la dernière position de broche ne survivent
+       pas à un changement de vue ou de pièce */
+    if (view !== "color") {
+      this._mode = null;
+      this._lastColor = null;
+      this._lastColorKey = null;
+    }
     this._view = view;
     if (roomKey !== undefined) this._roomKey = roomKey;
-    this._sig = "";
-    this._dirty = true;
+    this._invalidate();
     this._update();
   }
 
@@ -788,20 +835,18 @@ class HueLightsCard extends HTMLElement {
   _update() {
     if (!this._hass || !this._built || this._interacting) return;
     if (this._visible === false) return;
-    /* Differe le rendu au prochain frame pour eviter le lag */
+    /* diffère le rendu au prochain rafraîchissement d'écran */
     if (this._raf) cancelAnimationFrame(this._raf);
     this._raf = requestAnimationFrame(() => {
       this._raf = null;
-      this._doUpdate();
+      if (this.isConnected) this._doUpdate();
     });
   }
 
   _doUpdate() {
     const rooms = this._rooms();
     let sig = `${this._view}|${this._roomKey}|${[...this._sel].join()}|${this._config.layout}${this._config.columns}`;
-    sig += rooms
-      .map((r) => `${r.key}:${r.on}:${r.pct}:${r.colors.join()}`)
-      .join("|");
+    sig += rooms.map((r) => `${r.key}:${r.on}:${r.pct}:${r.colors.join()}`).join("|");
     if (this._view !== "grid") {
       const room = rooms.find((r) => r.key === this._roomKey) || null;
       if (room) sig += "|" + this._scenes(room).map((s) => s.id + (s.colors || "")).join();
@@ -810,6 +855,7 @@ class HueLightsCard extends HTMLElement {
     this._sig = sig;
 
     const host = this.shadowRoot.querySelector(".view");
+    if (!host) return;
     if (this._view === "grid") this._renderGrid(host, rooms);
     else if (this._view === "room") this._renderRoom(host);
     else this._renderColor(host);
@@ -826,23 +872,27 @@ class HueLightsCard extends HTMLElement {
     const sub = r.on
       ? `${r.on} lumière${r.on > 1 ? "s" : ""} · ${r.pct} %`
       : `${r.total} lumière${r.total > 1 ? "s" : ""} · éteinte${r.total > 1 ? "s" : ""}`;
+
     if (c.layout === "rows") {
-      const flat = r.flatLights || r.lights;
-      const hasDim = flat.some((l) => l.dimmable);
+      const hasDim = (r.flatLights || []).some((l) => l.dimmable);
       return `<div class="rw ${r.on ? "on" : "off"}" data-k="${esc(r.key)}">
         <div class="bg" style="background:${grad}"></div>
         <div class="ov" style="background:rgba(8,9,12,${Math.max(dim, lum).toFixed(2)})"></div>
-        <div class="scrim"></div>
         <div class="ct">
           <div class="ic"><svg viewBox="0 0 24 24">${roomIcon(r.name)}</svg></div>
           <div class="tx"><b>${nameE}</b><span>${esc(sub)}</span></div>
           <div class="sw ${r.on ? "on" : ""}" data-sw="1"><i></i></div>
         </div>
-        ${hasDim ? `<div class="sl"><div class="tk"><div class="fl" style="width:${r.pct}%"></div>
-          <div class="kn" style="left:${r.pct}%"></div></div></div>` : ""}
+        ${
+          hasDim
+            ? `<div class="sl"><div class="tk"><div class="fl" style="width:${r.pct}%"></div>
+                 <div class="kn" style="left:${r.pct}%"></div></div></div>`
+            : ""
+        }
         <div class="hud"><span class="hv">${r.pct}</span><small>%</small></div>
       </div>`;
     }
+
     return `<div class="tl ${r.on ? "on" : "off"}" data-k="${esc(r.key)}">
       <div class="bg" style="background:${grad}"></div>
       <div class="em" style="height:${100 - r.pct}%"></div>
@@ -915,6 +965,14 @@ class HueLightsCard extends HTMLElement {
       if (kn) kn.style.left = `${p}%`;
       if (hv) hv.textContent = p;
     };
+    const commit = (v) => {
+      this._pending.set(room.key, v);
+      setTimeout(() => {
+        this._pending.delete(room.key);
+        this._invalidate();
+      }, 2500);
+      this._setBrightness(room.on ? room.onIds : room.ids, v);
+    };
 
     el.addEventListener(
       "touchmove",
@@ -950,17 +1008,13 @@ class HueLightsCard extends HTMLElement {
       const dy = sy - e.clientY;
       moved = Math.max(moved, Math.hypot(dx, e.clientY - sy));
       if (onSwitch || c.gesture === "none") return;
-      /* Désactive le drag si aucune lampe de la pièce n'est dimmable */
-      const flat = room.flatLights || room.lights;
-      if (!flat.some((l) => l.dimmable)) return;
-      /* En mode rows, le slider a son propre handler direct */
+      if (!(room.flatLights || []).some((l) => l.dimmable)) return;
+      /* en disposition barres, le curseur a son propre gestionnaire */
       if (el.classList.contains("rw")) return;
       let delta = null;
-      const sl = el.querySelector(".sl");
-      const dragWidth = sl ? sl.clientWidth - 28 : el.getBoundingClientRect().width;
       if (c.gesture === "horizontal") {
         if (Math.abs(dx) < 4) return;
-        delta = (dx / dragWidth) * 100;
+        delta = (dx / el.getBoundingClientRect().width) * 100;
       } else {
         if (!armed) {
           if (moved > 8) clearTimeout(timer);
@@ -990,12 +1044,7 @@ class HueLightsCard extends HTMLElement {
         el.classList.remove("drag");
         pct = Math.round(pct);
         paint();
-        this._pending.set(room.key, pct);
-        setTimeout(() => {
-          this._pending.delete(room.key);
-          this._sig = "";
-        }, 2500);
-        this._setBrightness(room.on ? room.onIds : room.ids, pct);
+        commit(pct);
         dragging = false;
         return;
       }
@@ -1003,11 +1052,7 @@ class HueLightsCard extends HTMLElement {
       if (c.guard_thresholds && moved > 10) return;
       if (c.guard_thresholds && dt < 60) return;
 
-      if (onSwitch) {
-        this._toggleRoom(room);
-        return;
-      }
-      if (c.tap_action === "toggle") {
+      if (onSwitch || c.tap_action === "toggle") {
         this._toggleRoom(room);
         return;
       }
@@ -1022,23 +1067,21 @@ class HueLightsCard extends HTMLElement {
       this._interacting = false;
     });
 
-    /* Slider direct en mode rows : handler propre, sans garde-fous */
+    /* Curseur dédié en disposition barres */
     const slEl = el.querySelector(".sl");
     if (slEl) {
       let slDrag = false;
-      const slPaint = (v) => {
-        const p = Math.round(v);
-        const fl2 = slEl.querySelector(".fl");
-        const kn2 = slEl.querySelector(".kn");
-        if (fl2) fl2.style.width = `${p}%`;
-        if (kn2) kn2.style.left = `${p}%`;
-        const hv2 = el.querySelector(".hv");
-        if (hv2) hv2.textContent = p;
-      };
       const slFromX = (cx) => {
         const b = slEl.getBoundingClientRect();
-        const v = clamp(((cx - b.left - 14) / (b.width - 28)) * 100, 0, 100);
-        return v;
+        return clamp(((cx - b.left - 14) / (b.width - 28)) * 100, 0, 100);
+      };
+      const slPaint = (v) => {
+        const p = Math.round(v);
+        const f = slEl.querySelector(".fl");
+        const k = slEl.querySelector(".kn");
+        if (f) f.style.width = `${p}%`;
+        if (k) k.style.left = `${p}%`;
+        if (hv) hv.textContent = p;
       };
       slEl.addEventListener("pointerdown", (e) => {
         e.stopPropagation();
@@ -1059,22 +1102,16 @@ class HueLightsCard extends HTMLElement {
         pct = v;
       });
       slEl.addEventListener("pointerup", (e) => {
-        e.stopPropagation();
         if (!slDrag) return;
+        e.stopPropagation();
         slDrag = false;
         this._interacting = false;
         el.classList.remove("drag");
         const v = Math.round(slFromX(e.clientX));
         slPaint(v);
-        this._pending.set(room.key, v);
-        setTimeout(() => {
-          this._pending.delete(room.key);
-          this._sig = "";
-        }, 2500);
-        this._setBrightness(room.on ? room.onIds : room.ids, v);
+        commit(v);
       });
-      slEl.addEventListener("pointercancel", (e) => {
-        e.stopPropagation();
+      slEl.addEventListener("pointercancel", () => {
         slDrag = false;
         this._interacting = false;
         el.classList.remove("drag");
@@ -1088,6 +1125,7 @@ class HueLightsCard extends HTMLElement {
     const c = this._config;
     const room = this._room(this._roomKey);
     if (!room) return this._go("grid");
+    const lights = room.flatLights || [];
     const scenes = this._scenes(room);
     const dim = room.on ? Math.max(0, 1 - (room.pct / 100) * 0.85) : 0;
 
@@ -1101,10 +1139,12 @@ class HueLightsCard extends HTMLElement {
             <div class="rname">${esc(room.name)}</div>
             <div class="sw ${room.on ? "on" : ""}" data-rsw="1"><i></i></div>
           </div>
-          ${(room.flatLights || room.lights).some((l) => l.dimmable)
-            ? `<div class="rslider"><div class="rfill" style="width:${room.pct}%"></div>
-               <div class="rknob" style="left:${room.pct}%"></div></div>`
-            : ""}
+          ${
+            lights.some((l) => l.dimmable)
+              ? `<div class="rslider"><div class="rfill" style="width:${room.pct}%"></div>
+                   <div class="rknob" style="left:${room.pct}%"></div></div>`
+              : ""
+          }
         </div>
       </div>
 
@@ -1139,64 +1179,33 @@ class HueLightsCard extends HTMLElement {
 
       <div class="rsec rowsec"><span>Lumières</span>
         ${
-          c.show_color_picker && (room.flatLights || room.lights).some((l) => l.colorable || l.kelvinable)
+          c.show_color_picker && lights.some((l) => l.colorable || l.kelvinable)
             ? `<span class="pill2" data-group="1">Couleur du groupe</span>`
             : ""
         }
-        ${
-          c.allow_scene_create
-            ? `<span class="pill2" data-save="1">Enregistrer</span>`
-            : ""
-        }
+        ${c.allow_scene_create ? `<span class="pill2" data-save="1">Enregistrer</span>` : ""}
       </div>
-      <div class="lights">${room.lights
+      <div class="lights">${lights
         .map((l) => {
-          /* Un groupe est remplacé par ses membres directement */
-          if (l.isGroup && l.members) {
-            const memLights = l.members
-              .map((mid) => {
-                const mst = this._hass.states[mid];
-                if (!mst || mst.state === "unavailable") return null;
-                const md = mst.state === "on" ? Math.max(0, 1 - ((mst.attributes?.brightness || 255) / 255) * 0.8) : 0;
-                return { mid, mst, md };
-              })
-              .filter(Boolean);
-            if (memLights.length) {
-              return memLights.map((m) => {
-                const mColor = m.mst.state === "on" ? lightColor(m.mst) : "#2a2e36";
-                return `<div class="lt ${m.mst.state === "on" ? "on" : "off"}" data-l="${esc(m.mid)}">
-                  <div class="ltbg" style="background:${mColor}"></div>
-                  <div class="ltov" style="background:rgba(8,9,12,${m.md.toFixed(2)})"></div>
-                  <div class="scrim" style="opacity:${m.mst.state === "on" ? this._dim({colors:[mColor],on:true}).toFixed(2) : 0}"></div>
-                  <div class="ltct">
-                    <div class="ltic"><svg viewBox="0 0 24 24">${ICONS.bulb}</svg></div>
-                    <div class="ltn">${esc(m.mst.attributes?.friendly_name || m.mid)}</div>
-                    <div class="ltbar"><div class="ltsw ${m.mst.state === "on" ? "on" : ""}" data-lsw="${esc(m.mid)}"><i></i></div></div>
-                  </div></div>`;
-              }).join("");
-            }
-          }
           const d = l.on ? Math.max(0, 1 - (l.pct / 100) * 0.8) : 0;
+          const lum = l.on ? this._dim({ colors: [l.color], on: true }) : 0;
           return `<div class="lt ${l.on ? "on" : "off"}" data-l="${esc(l.id)}">
             <div class="ltbg" style="background:${l.on ? l.color : "#2a2e36"}"></div>
             <div class="ltov" style="background:rgba(8,9,12,${d.toFixed(2)})"></div>
-            <div class="scrim" style="opacity:${l.on ? this._dim({colors:[l.color],on:true}).toFixed(2) : 0}"></div>
+            <div class="scrim" style="opacity:${lum.toFixed(2)}"></div>
             <div class="ltct">
               <div class="ltic"><svg viewBox="0 0 24 24">${ICONS.bulb}</svg></div>
               <div class="ltn">${esc(l.name)}</div>
-              <div class="ltbar"><div class="ltsw ${l.on ? "on" : ""}" data-lsw="${
-            esc(l.id)
-          }"><i></i></div></div>
+              <div class="ltbar"><div class="ltsw ${l.on ? "on" : ""}" data-lsw="${esc(
+            l.id
+          )}"><i></i></div></div>
             </div></div>`;
         })
         .join("")}</div>`;
 
     host.querySelector(".rback").addEventListener("click", () => this._go("grid"));
-    host
-      .querySelector("[data-rsw]")
-      .addEventListener("click", () => this._toggleRoom(room));
+    host.querySelector("[data-rsw]").addEventListener("click", () => this._toggleRoom(room));
 
-    /* curseur d'intensité de la pièce (seulement si des lampes sont dimmables) */
     const sl = host.querySelector(".rslider");
     if (sl) {
       const setFromX = (cx) => {
@@ -1217,8 +1226,11 @@ class HueLightsCard extends HTMLElement {
       sl.addEventListener("pointerup", (e) => {
         sliding = false;
         this._interacting = false;
-        const v = setFromX(e.clientX);
-        this._setBrightness(room.on ? room.onIds : room.ids, v);
+        this._setBrightness(room.on ? room.onIds : room.ids, setFromX(e.clientX));
+      });
+      sl.addEventListener("pointercancel", () => {
+        sliding = false;
+        this._interacting = false;
       });
     }
 
@@ -1234,9 +1246,7 @@ class HueLightsCard extends HTMLElement {
       this._go("color");
     });
 
-    host
-      .querySelector("[data-save]")
-      ?.addEventListener("click", () => this._openSaveDialog(room));
+    host.querySelector("[data-save]")?.addEventListener("click", () => this._openSaveDialog(room));
 
     host.querySelectorAll("[data-l]").forEach((el) => {
       let t0 = 0,
@@ -1258,23 +1268,16 @@ class HueLightsCard extends HTMLElement {
         if (moved > 10 || Date.now() - t0 < 60) return;
         const id = el.dataset.l;
         if (onSw) {
-          this._toggle([id]);
-          /* Mise à jour visuelle immédiate du commutateur */
+          const light = lights.find((l) => l.id === id);
           const swEl = el.querySelector("[data-lsw]");
-          if (swEl) {
-            const light = room.lights.find((l) => l.id === id)
-              || (room.flatLights || []).find((l) => l.id === id);
-            if (light) {
-              const newOn = !light.on;
-              swEl.classList.toggle("on", newOn);
-              light.on = newOn;
-            }
+          if (light && swEl) {
+            light.on = !light.on;
+            swEl.classList.toggle("on", light.on);
           }
-          this._sig = "";
-          this._dirty = true;
+          this._toggle([id]);
           return;
         }
-        if (!this._config.show_color_picker) {
+        if (!c.show_color_picker) {
           fireEvent(this, "hass-more-info", { entityId: id });
           return;
         }
@@ -1290,7 +1293,7 @@ class HueLightsCard extends HTMLElement {
     let lo = 2000;
     let hi = 6500;
     lights.forEach((l) => {
-      const a = l.st.attributes || {};
+      const a = l.st?.attributes || {};
       if (a.min_color_temp_kelvin) lo = Math.max(lo, a.min_color_temp_kelvin);
       if (a.max_color_temp_kelvin) hi = Math.min(hi, a.max_color_temp_kelvin);
     });
@@ -1298,7 +1301,7 @@ class HueLightsCard extends HTMLElement {
   }
 
   _lightHS(l) {
-    const a = l.st.attributes || {};
+    const a = l.st?.attributes || {};
     if (Array.isArray(a.hs_color)) return [a.hs_color[0], a.hs_color[1] / 100, "color"];
     if (Array.isArray(a.rgb_color) && a.rgb_color.length >= 3)
       return [...rgbToHs(a.rgb_color[0], a.rgb_color[1], a.rgb_color[2]), "color"];
@@ -1312,7 +1315,8 @@ class HueLightsCard extends HTMLElement {
   _renderColor(host) {
     const room = this._room(this._roomKey);
     if (!room) return this._go("grid");
-    const lights = room.flatLights || room.lights;
+    const lights = room.flatLights || [];
+    if (!lights.length) return this._go("room");
     const sel = lights.filter((l) => this._sel.has(l.id));
     if (!sel.length) {
       this._sel = new Set([lights[0].id]);
@@ -1320,55 +1324,63 @@ class HueLightsCard extends HTMLElement {
     }
     const ref = sel[0];
     const [rh, rs, rmode] = this._lightHS(ref);
-    /* Si on vient de sélectionner une couleur sur la roue, on garde la
-       position du curseur au lieu de revenir à l'état brut de la lampe
-       (qui peut différer à cause de l'arrondi hs_color ou de la latence HA). */
-    const lastColorKey = [...this._sel].sort().join(",");
-    const last = this._lastColor && this._lastColorKey === lastColorKey
-      ? this._lastColor : null;
+
+    /* Après un réglage, on conserve la position de la broche : l'état revenu
+       du serveur peut différer à cause de l'arrondi ou de la latence. */
+    const selKey = [...this._sel].sort().join(",");
+    const last =
+      this._lastColor && this._lastColorKey === selKey ? this._lastColor : null;
     const initH = last ? last.h : rh;
     const initS = last ? last.s : rs;
-    const mode = this._mode || rmode;
+
+    const anyRgb = sel.some((l) => l.colorable);
+    const hasKelvin = sel.some((l) => l.kelvinable);
+    const anyColorable = anyRgb || hasKelvin;
+    const anyDimmable = sel.some((l) => l.dimmable);
+    /* le mode couleur n'a de sens que si une lampe RGB est sélectionnée */
+    let mode = this._mode || rmode;
+    if (mode === "color" && !anyRgb) mode = "white";
+    if (mode === "white" && !hasKelvin) mode = "color";
+
     const [kLo, kHi] = this._kelvinRange(sel);
     const avg = Math.round(sel.reduce((a, b) => a + b.pct, 0) / sel.length) || 100;
     const allSel = sel.length === lights.length;
-    /* Capacités de la sélection */
-    const anyRgb = sel.some((l) => l.colorable);
-    const anyColorable = anyRgb || sel.some((l) => l.kelvinable);
-    const anyDimmable = sel.some((l) => l.dimmable);
-    const hasKelvin = sel.some((l) => l.kelvinable);
 
     host.innerHTML = `
       <div class="cptop">
         <div class="cpb" data-back="1"><svg viewBox="0 0 24 24" style="width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round">${ICONS.back}</svg></div>
-        ${
-          this._config.allow_scene_create
-            ? `<div class="cpb" data-save="1">Enregistrer la scène</div>`
-            : ""
-        }
+        ${this._config.allow_scene_create ? `<div class="cpb" data-save="1">Enregistrer la scène</div>` : ""}
         <div class="cpb right" data-done="1">Terminé</div>
       </div>
       <div class="cptitle">${
         sel.length === 1 ? esc(ref.name) : `${sel.length} lampes sélectionnées`
       }</div>
-      ${anyColorable ? `<div class="wheelw">
-        <div class="wheel ${mode}"></div>
-        <div class="dots"></div>
-        <div class="pin"><svg viewBox="0 0 38 46">
-          <path d="M19 46C19 46 36 26.5 36 17A17 17 0 1 0 2 17C2 26.5 19 46 19 46Z" fill="${ref.color}"/>
-        </svg><div class="pi"><svg viewBox="0 0 24 24">${ICONS.bulb}</svg></div></div>
-      </div>` : `<div class="cp-no-color">Aucune lampe de la sélection ne supporte la couleur.</div>`}
+      ${
+        anyColorable
+          ? `<div class="wheelw">
+               <div class="wheel ${mode}"></div>
+               <div class="dots"></div>
+               <div class="pin"><svg viewBox="0 0 38 46">
+                 <path d="M19 46C19 46 36 26.5 36 17A17 17 0 1 0 2 17C2 26.5 19 46 19 46Z" fill="${ref.color}"/>
+               </svg><div class="pi"><svg viewBox="0 0 24 24">${ICONS.bulb}</svg></div></div>
+             </div>`
+          : `<div class="cp-no-color">Aucune lampe de la sélection ne gère la couleur.</div>`
+      }
       <div class="cpmodes">
         <div class="mchips">
           ${anyRgb ? `<div class="mc rainbow ${mode === "color" ? "on" : ""}" data-m="color"></div>` : ""}
           ${hasKelvin ? `<div class="mc white ${mode === "white" ? "on" : ""}" data-m="white"></div>` : ""}
           <div class="mc fx" data-m="fx"><svg viewBox="0 0 24 24">${ICONS.spark}</svg></div>
         </div>
-        ${anyDimmable ? `<div class="cpbr">
-          <div class="cpbrv">${avg} %</div>
-          <div class="cpbrs"><div class="cpbrf" style="width:${avg}%"></div>
-            <svg viewBox="0 0 24 24" style="stroke:#12151c">${ICONS.sun}</svg></div>
-        </div>` : ""}
+        ${
+          anyDimmable
+            ? `<div class="cpbr">
+                 <div class="cpbrv">${avg} %</div>
+                 <div class="cpbrs"><div class="cpbrf" style="width:${avg}%"></div>
+                   <svg viewBox="0 0 24 24" style="stroke:#12151c">${ICONS.sun}</svg></div>
+               </div>`
+            : ""
+        }
       </div>
       <div class="cpsel"><span class="cpsl">Appliquer à</span>
         <span class="pill2 ${allSel ? "on" : ""}" data-all="1">Toutes les lampes</span></div>
@@ -1381,24 +1393,22 @@ class HueLightsCard extends HTMLElement {
             <div class="cpcheck"><svg viewBox="0 0 24 24">${ICONS.check}</svg></div>
             <div class="ltct"><div class="ltic"><svg viewBox="0 0 24 24">${ICONS.bulb}</svg></div>
               <div class="ltn">${esc(l.name)}</div>
-              <div class="ltbar"><div class="ltsw ${l.on ? "on" : ""}" data-clsw="${
-            esc(l.id)
-          }"><i></i></div></div></div></div>`;
+              <div class="ltbar"><div class="ltsw ${l.on ? "on" : ""}" data-clsw="${esc(
+            l.id
+          )}"><i></i></div></div></div></div>`;
         })
         .join("")}</div>`;
 
-    /* en-tête */
     host.querySelector("[data-back]").addEventListener("click", () => this._go("room"));
     host.querySelector("[data-done]").addEventListener("click", () => this._go("room"));
-    host
-      .querySelector("[data-save]")
-      ?.addEventListener("click", () => this._openSaveDialog(room));
+    host.querySelector("[data-save]")?.addEventListener("click", () => this._openSaveDialog(room));
 
-    /* sélection */
     host.querySelector("[data-all]").addEventListener("click", () => {
       this._sel = allSel ? new Set([ref.id]) : new Set(room.ids);
+      this._lastColor = null;
       this._go("color");
     });
+
     host.querySelectorAll("[data-cl]").forEach((el) =>
       el.addEventListener("click", (e) => {
         if (e.target.closest("[data-clsw]")) return;
@@ -1406,27 +1416,23 @@ class HueLightsCard extends HTMLElement {
         if (this._sel.has(id)) {
           if (this._sel.size > 1) this._sel.delete(id);
         } else this._sel.add(id);
+        this._lastColor = null;
         this._go("color");
       })
     );
+
     host.querySelectorAll("[data-clsw]").forEach((sw) =>
       sw.addEventListener("click", (e) => {
         e.stopPropagation();
-        this._toggle([sw.dataset.clsw]);
-        /* Mise à jour visuelle immédiate du commutateur */
         const light = lights.find((l) => l.id === sw.dataset.clsw);
         if (light) {
-          const newOn = !light.on;
-          sw.classList.toggle("on", newOn);
-          light.on = newOn;
+          light.on = !light.on;
+          sw.classList.toggle("on", light.on);
         }
-        /* Force un re-render au prochain cycle hass */
-        this._sig = "";
-        this._dirty = true;
+        this._toggle([sw.dataset.clsw]);
       })
     );
 
-    /* modes */
     host.querySelectorAll(".mc[data-m]").forEach((m) =>
       m.addEventListener("click", () => {
         const v = m.dataset.m;
@@ -1435,11 +1441,13 @@ class HueLightsCard extends HTMLElement {
           return;
         }
         this._mode = v;
-        this._go("color");
+        this._lastColor = null;
+        this._sig = "";
+        this._doUpdate();
       })
     );
 
-    /* roue (seulement si des lampes sont colorables) */
+    /* roue */
     const ww = host.querySelector(".wheelw");
     if (ww) {
       const pin = host.querySelector(".pin");
@@ -1483,15 +1491,12 @@ class HueLightsCard extends HTMLElement {
         curS = dist / (r0 * 0.94);
         place();
         this._lastColor = { h: curH, s: curS };
-        this._lastColorKey = lastColorKey;
+        this._lastColorKey = selKey;
         if (!commit) return;
         const ids = [...this._sel];
         if (mode === "white")
           this._setColor(ids, { color_temp_kelvin: hueToKelvin(curH, kLo, kHi) });
-        else
-          this._setColor(ids, {
-            hs_color: [Math.round(curH), Math.round(curS * 100)],
-          });
+        else this._setColor(ids, { hs_color: [Math.round(curH), Math.round(curS * 100)] });
       };
       let drag = false;
       ww.addEventListener("pointerdown", (e) => {
@@ -1506,9 +1511,13 @@ class HueLightsCard extends HTMLElement {
         this._interacting = false;
         apply(e.clientX, e.clientY, true);
       });
+      ww.addEventListener("pointercancel", () => {
+        drag = false;
+        this._interacting = false;
+      });
     }
 
-    /* intensité (seulement si des lampes sont dimmables) */
+    /* intensité */
     const bs = host.querySelector(".cpbrs");
     if (bs) {
       const setB = (cx) => {
@@ -1530,6 +1539,10 @@ class HueLightsCard extends HTMLElement {
         bd = false;
         this._interacting = false;
         this._setBrightness([...this._sel], setB(e.clientX));
+      });
+      bs.addEventListener("pointercancel", () => {
+        bd = false;
+        this._interacting = false;
       });
     }
   }
@@ -1573,7 +1586,7 @@ class HueLightsCard extends HTMLElement {
       const name = (input.value || "").trim() || room.name;
       this._createScene(room, name);
       close();
-      this._sig = "";
+      this._invalidate();
       this._update();
     };
     dlg.querySelector("[data-ok]").addEventListener("click", save);
@@ -1597,11 +1610,12 @@ ha-card{
   padding:16px 14px 14px;color:#eef1f6;position:relative;overflow:hidden;
   font-family:var(--primary-font-family,"Inter","Segoe UI",Roboto,sans-serif);
 }
-/* mode transparent : fond invisible, bordure invisible, padding réduit */
+/* mode transparent : fond et bordure invisibles, aucune marge intérieure */
 ha-card.transparent{
   background:transparent !important;border:none !important;
   padding:0;box-shadow:none !important;
 }
+ha-card.transparent .toast{left:0;right:0;bottom:0;}
 
 /* ---- en-tête grille ---- */
 .hd{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:2px 4px 0;}
@@ -1617,7 +1631,7 @@ ha-card.transparent{
 .body.tiles{display:grid;gap:8px;}
 .body.rows{display:flex;flex-direction:column;gap:8px;}
 
-/* ---- vignettes ---- */
+/* ---- vignettes de pièce ---- */
 .tl{position:relative;height:124px;border-radius:17px;
   touch-action:pan-y;user-select:none;-webkit-user-select:none;transition:transform .12s;
   clip-path:inset(0 round 17px);}
@@ -1627,11 +1641,11 @@ ha-card.transparent{
 .tl .bg{position:absolute;inset:0;}
 .tl .scrim{position:absolute;inset:0;pointer-events:none;
   background:linear-gradient(to bottom,rgba(8,9,12,0) 35%,rgba(8,9,12,.45) 70%,rgba(8,9,12,.72) 100%);
-  opacity:0;transition:opacity .2s;}
+  transition:opacity .2s;}
 .tl .em{position:absolute;left:0;right:0;top:0;background:rgba(8,9,12,.82);
   transition:height .18s;}
 .tl.drag .em{transition:none;}
-.tl.off .em{border-bottom:none;background:rgba(8,9,12,.86);}
+.tl.off .em{background:rgba(8,9,12,.86);}
 .tl .ct{position:relative;height:100%;display:flex;flex-direction:column;
   justify-content:space-between;padding:12px 13px;}
 .tl .top{display:flex;align-items:flex-start;justify-content:space-between;}
@@ -1646,7 +1660,7 @@ ha-card.transparent{
 .tl.off .bot b{color:rgba(255,255,255,.55);}
 .tl.off .bot span{color:rgba(255,255,255,.28);}
 
-/* ---- barres ---- */
+/* ---- barres de pièce ---- */
 .rw{position:relative;height:84px;border-radius:16px;
   touch-action:pan-y;user-select:none;-webkit-user-select:none;transition:transform .12s;
   clip-path:inset(0 round 16px);}
@@ -1654,9 +1668,6 @@ ha-card.transparent{
 .rw.armed{box-shadow:0 0 0 2px rgba(255,255,255,.55);}
 .rw.off{box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);}
 .rw .bg,.rw .ov{position:absolute;inset:0;}
-.rw .scrim{position:absolute;inset:0;pointer-events:none;
-  background:linear-gradient(to right,rgba(8,9,12,.45) 0%,rgba(8,9,12,.15) 40%,rgba(8,9,12,.45) 100%);
-  opacity:0;transition:opacity .2s;}
 .rw .ct{position:relative;display:flex;align-items:center;gap:11px;padding:13px 14px 0;}
 .rw .ic{width:26px;height:26px;flex-shrink:0;display:flex;align-items:center;
   justify-content:center;pointer-events:none;}
@@ -1699,7 +1710,8 @@ ha-card.transparent{
 .drag .bot,.drag .top,.drag .tx,.drag .ic{opacity:.25;transition:.14s;}
 
 /* ---- vue pièce ---- */
-.rhead{position:relative;border-radius:18px;overflow:hidden;padding:14px 15px 16px;}
+.rhead{position:relative;border-radius:18px;overflow:hidden;padding:14px 15px 16px;
+  clip-path:inset(0 round 18px);}
 .rhbg,.rhov{position:absolute;inset:0;}
 .rhct{position:relative;}
 .rhtop{display:flex;align-items:center;gap:10px;}
@@ -1727,14 +1739,16 @@ ha-card.transparent{
 .scn{position:relative;background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.06);
   border-radius:15px;padding:13px 6px 11px;text-align:center;cursor:pointer;transition:.15s;}
 .scn:hover{background:rgba(255,255,255,.09);}
-.scdot{width:50px;height:50px;border-radius:50%;margin:0 auto;
+.sdot{width:50px;height:50px;border-radius:50%;margin:0 auto;
   display:flex;align-items:center;justify-content:center;
   box-shadow:0 4px 14px rgba(0,0,0,.4);}
-.scdot svg{width:24px;height:24px;}
+.sdot svg{width:24px;height:24px;}
 .scn b{display:block;font-size:10.5px;font-weight:600;margin-top:8px;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .scn .dyn{display:block;font-style:normal;font-size:8px;letter-spacing:.6px;
   text-transform:uppercase;color:rgba(255,255,255,.3);margin-top:3px;}
+
+/* ---- vignettes de lampe ---- */
 .lights{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;}
 .lt{position:relative;border-radius:15px;overflow:hidden;
   min-height:132px;cursor:pointer;transition:transform .12s;
@@ -1752,10 +1766,10 @@ ha-card.transparent{
   text-shadow:0 1px 4px rgba(0,0,0,.45);
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
   overflow:hidden;word-break:break-word;}
-.ltn small{font-size:10px;font-weight:400;opacity:.55;}
 .lt.off .ltn{color:rgba(255,255,255,.55);}
-.ltbar{margin:10px calc(var(--pad) * -1) 0;padding:10px var(--pad) 12px;
-  flex-shrink:0;border-top:1px solid rgba(255,255,255,.16);}
+/* le trait reste dans la marge intérieure : il ne rencontre jamais la courbe */
+.ltbar{margin:10px 0 0;padding:10px 0 12px;flex-shrink:0;
+  border-top:1px solid rgba(255,255,255,.16);}
 .ltsw{width:44px;height:26px;border-radius:14px;background:rgba(0,0,0,.3);
   border:1px solid rgba(255,255,255,.2);position:relative;cursor:pointer;}
 .ltsw i{position:absolute;top:2.5px;left:3px;width:19px;height:19px;border-radius:50%;
@@ -1791,6 +1805,9 @@ ha-card.transparent{
 .pin .pi{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
   padding-bottom:9px;}
 .pin .pi svg{width:16px;height:16px;fill:#fff;}
+.cp-no-color{padding:40px 20px;text-align:center;color:rgba(255,255,255,.4);
+  font-size:13px;background:rgba(255,255,255,.04);border-radius:18px;margin:18px auto;
+  max-width:270px;}
 .cpmodes{display:flex;align-items:center;gap:10px;margin-top:20px;}
 .mchips{display:flex;gap:9px;align-items:center;background:rgba(255,255,255,.07);
   border-radius:22px;padding:7px 11px;}
@@ -1803,9 +1820,6 @@ ha-card.transparent{
 .mc.fx svg{width:16px;height:16px;fill:#fff;}
 .cpbr{margin-left:auto;text-align:right;}
 .cpbrv{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;}
-.cp-no-color{padding:40px 20px;text-align:center;color:rgba(255,255,255,.4);
-  font-size:13px;background:rgba(255,255,255,.04);border-radius:18px;margin:18px auto;
-  max-width:270px;}
 .cpbrs{position:relative;width:104px;height:34px;border-radius:18px;margin-top:6px;
   background:rgba(255,255,255,.12);overflow:hidden;cursor:pointer;touch-action:none;}
 .cpbrf{position:absolute;left:0;top:0;bottom:0;background:rgba(255,255,255,.55);}
@@ -1877,8 +1891,10 @@ class HueLightsCardEditor extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
-    this.shadowRoot?.querySelectorAll("ha-entity-picker")
-      .forEach((p) => { p.hass = hass; });
+    /* setConfig est appelé avant hass : on propage aux sélecteurs déjà créés */
+    this.shadowRoot?.querySelectorAll("ha-entity-picker").forEach((p) => {
+      p.hass = hass;
+    });
     this._sync();
   }
 
@@ -1983,7 +1999,8 @@ class HueLightsCardEditor extends HTMLElement {
             <div class="row" data-k="show_header"><div class="sw"><i></i></div>
               <div class="tx"><b>En-tête</b><span>Titre et interrupteur général.</span></div></div>
             <div class="row" data-k="transparent"><div class="sw"><i></i></div>
-              <div class="tx"><b>Carte transparente</b><span>Fond et bordure invisibles, vignettes seules.</span></div></div>
+              <div class="tx"><b>Carte transparente</b>
+                <span>Fond et bordure invisibles, vignettes seules.</span></div></div>
             <div class="row" data-k="show_off"><div class="sw"><i></i></div>
               <div class="tx"><b>Pièces éteintes</b><span>Sinon seules les allumées.</span></div></div>
             <div class="row" data-k="show_unassigned"><div class="sw"><i></i></div>
@@ -1995,22 +2012,21 @@ class HueLightsCardEditor extends HTMLElement {
 
         <div class="grp"><label class="lb">Lumières à afficher</label>
           <div class="picker" data-k="entities"></div>
-          <div class="hint">Sélection manuelle de lumières et prises. Si rempli, ignore la
-            découverte automatique et le filtre par pièce.</div></div>
+          <div class="hint">Sélection manuelle de lumières et de prises. Si la liste est
+            remplie, la découverte automatique et le filtre par pièce sont ignorés.</div></div>
 
         <div class="grp"><label class="lb">Ordre d'affichage</label>
           <div class="seg small" data-k="sort">
             <div class="sg" data-v="auto">Automatique</div>
             <div class="sg" data-v="manual">Manuel</div></div>
           <div class="reorder" id="reorder"></div>
-          <div class="hint">En mode manuel, réordonne les entités avec les flèches.
-            L'ordre suit la liste « Lumières à afficher ».</div></div>
+          <div class="hint">En mode manuel, réordonnez les entités avec les flèches.</div></div>
 
         <div class="grp"><label class="lb">Regroupement</label>
           <div class="sws">
             <div class="row" data-k="group_by_area"><div class="sw"><i></i></div>
               <div class="tx"><b>Regrouper par pièce</b>
-                <span>Sinon chaque lampe est sa propre tuile.</span></div></div>
+                <span>Sinon chaque lampe devient sa propre tuile.</span></div></div>
           </div></div>
 
         <div class="grp"><label class="lb">Exclure <small>motifs séparés par des virgules</small></label>
@@ -2019,6 +2035,7 @@ class HueLightsCardEditor extends HTMLElement {
       </div>`;
     this._built = true;
     const sr = this.shadowRoot;
+
     sr.querySelectorAll(".txt").forEach((inp) =>
       inp.addEventListener("change", () => {
         const k = inp.dataset.k;
@@ -2031,12 +2048,13 @@ class HueLightsCardEditor extends HTMLElement {
         this._set(k, v);
       })
     );
-    /* Sélecteur d'entités (ha-entities-picker) pour le champ entities */
+
+    /* Sélecteur d'entités natif */
     sr.querySelectorAll(".picker").forEach((el) => {
       const k = el.dataset.k;
       const picker = document.createElement("ha-entity-picker");
       picker.setAttribute("label", "Ajouter une entité");
-      picker.hass = this._hass;
+      if (this._hass) picker.hass = this._hass;
       picker.includeDomains = ["light", "switch"];
       picker.allowCustomEntity = true;
       picker.value = "";
@@ -2051,22 +2069,25 @@ class HueLightsCardEditor extends HTMLElement {
         picker.value = "";
       });
       el.appendChild(picker);
-      /* Zone pour afficher les entités sélectionnées avec bouton remove */
       const chips = document.createElement("div");
       chips.className = "ent-chips";
       el.appendChild(chips);
     });
+
     sr.querySelectorAll(".seg").forEach((seg) =>
       seg.querySelectorAll(".sg").forEach((sg) =>
         sg.addEventListener("click", () =>
-          this._set(seg.dataset.k, seg.dataset.k === "columns" ? Number(sg.dataset.v) : sg.dataset.v)
+          this._set(
+            seg.dataset.k,
+            seg.dataset.k === "columns" ? Number(sg.dataset.v) : sg.dataset.v
+          )
         )
       )
     );
     sr.querySelectorAll(".chips").forEach((ch) =>
-      ch.querySelectorAll(".chip").forEach((c) =>
-        c.addEventListener("click", () => this._toggleList(ch.dataset.k, c.dataset.v))
-      )
+      ch
+        .querySelectorAll(".chip")
+        .forEach((c) => c.addEventListener("click", () => this._toggleList(ch.dataset.k, c.dataset.v)))
     );
     sr.querySelectorAll(".row").forEach((row) =>
       row.addEventListener("click", () => this._set(row.dataset.k, !this._config[row.dataset.k]))
@@ -2081,7 +2102,8 @@ class HueLightsCardEditor extends HTMLElement {
   _sync() {
     const sr = this.shadowRoot;
     const c = this._config;
-    if (!this._built) return;
+    if (!this._built || !c) return;
+
     sr.querySelectorAll(".txt").forEach((inp) => {
       const v = c[inp.dataset.k];
       inp.value = Array.isArray(v) ? v.join(", ") : v === undefined || v === null ? "" : v;
@@ -2096,9 +2118,7 @@ class HueLightsCardEditor extends HTMLElement {
     sr.querySelectorAll(".chips").forEach((ch) =>
       ch
         .querySelectorAll(".chip")
-        .forEach((x) =>
-          x.classList.toggle("on", (c[ch.dataset.k] || []).includes(x.dataset.v))
-        )
+        .forEach((x) => x.classList.toggle("on", (c[ch.dataset.k] || []).includes(x.dataset.v)))
     );
     sr.querySelectorAll(".row").forEach((row) =>
       row.classList.toggle("on", !!c[row.dataset.k])
@@ -2111,47 +2131,56 @@ class HueLightsCardEditor extends HTMLElement {
       vertical_hold: "Maintenir arme la surface, puis le glissement vertical règle l'intensité.",
       none: "Aucun réglage au doigt : seuls la bascule et la navigation restent.",
     }[c.gesture];
-    /* Affiche les entités sélectionnées comme chips cliquables (remove) */
+
+    /* Entités choisies, en pastilles supprimables */
     sr.querySelectorAll(".picker").forEach((el) => {
       const k = el.dataset.k;
       const chips = el.querySelector(".ent-chips");
       if (!chips) return;
       const list = Array.isArray(c[k]) ? c[k] : [];
-      chips.innerHTML = list.map((eid) => {
-        const fn = this._hass?.states?.[eid]?.attributes?.friendly_name || eid;
-        return `<div class="ent-chip" data-eid="${esc(eid)}">${esc(fn)} <span class="ent-x">✕</span></div>`;
-      }).join("");
-      chips.querySelectorAll(".ent-chip").forEach((chip) =>
-        chip.addEventListener("click", () => {
-          const eid = chip.dataset.eid;
-          this._set(k, list.filter((x) => x !== eid));
+      chips.innerHTML = list
+        .map((eid) => {
+          const fn = this._hass?.states?.[eid]?.attributes?.friendly_name || eid;
+          return `<div class="ent-chip" data-eid="${esc(eid)}">${esc(fn)} <span class="ent-x">✕</span></div>`;
         })
+        .join("");
+      chips.querySelectorAll(".ent-chip").forEach((chip) =>
+        chip.addEventListener("click", () =>
+          this._set(k, list.filter((x) => x !== chip.dataset.eid))
+        )
       );
     });
-    /* Liste réordonnable (mode manual) */
+
+    /* Liste réordonnable */
     const reorder = sr.querySelector("#reorder");
     if (reorder) {
       const entities = Array.isArray(c.entities) ? c.entities : [];
       const order = Array.isArray(c.order) ? c.order : entities;
-      // merge: entities not in order go at the end
-      const merged = [...order.filter((e) => entities.includes(e)),
-        ...entities.filter((e) => !order.includes(e))];
+      const merged = [
+        ...order.filter((e) => entities.includes(e)),
+        ...entities.filter((e) => !order.includes(e)),
+      ];
       if (c.sort === "manual" && merged.length > 1) {
         reorder.style.display = "";
-        reorder.innerHTML = merged.map((eid, i) => {
-          const fn = this._hass?.states?.[eid]?.attributes?.friendly_name || eid;
-          return `<div class="ro-item" data-eid="${esc(eid)}">
-            <span class="ro-name">${esc(fn)}</span>
-            <span class="ro-arrows">
-              <span class="ro-up" data-dir="-1" ${i === 0 ? 'style="opacity:.3;pointer-events:none"' : ''}>▲</span>
-              <span class="ro-down" data-dir="1" ${i === merged.length - 1 ? 'style="opacity:.3;pointer-events:none"' : ''}>▼</span>
-            </span></div>`;
-        }).join("");
+        reorder.innerHTML = merged
+          .map((eid, i) => {
+            const fn = this._hass?.states?.[eid]?.attributes?.friendly_name || eid;
+            return `<div class="ro-item" data-eid="${esc(eid)}">
+              <span class="ro-name">${esc(fn)}</span>
+              <span class="ro-arrows">
+                <span class="ro-up" data-dir="-1" ${
+                  i === 0 ? 'style="opacity:.3;pointer-events:none"' : ""
+                }>▲</span>
+                <span class="ro-down" data-dir="1" ${
+                  i === merged.length - 1 ? 'style="opacity:.3;pointer-events:none"' : ""
+                }>▼</span>
+              </span></div>`;
+          })
+          .join("");
         reorder.querySelectorAll(".ro-up, .ro-down").forEach((btn) =>
           btn.addEventListener("click", () => {
-            const item = btn.closest(".ro-item");
-            const eid = item.dataset.eid;
-            const dir = parseInt(btn.dataset.dir);
+            const eid = btn.closest(".ro-item").dataset.eid;
+            const dir = Number(btn.dataset.dir);
             const idx = merged.indexOf(eid);
             const ni = idx + dir;
             if (ni < 0 || ni >= merged.length) return;
