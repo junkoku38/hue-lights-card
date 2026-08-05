@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.4.5
+ * Hue Lights Card v2.4.6
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.4.5";
+const CARD_VERSION = "2.4.6";
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -919,6 +919,9 @@ class HueLightsCard extends HTMLElement {
       const dy = sy - e.clientY;
       moved = Math.max(moved, Math.hypot(dx, e.clientY - sy));
       if (onSwitch || c.gesture === "none") return;
+      /* Désactive le drag si aucune lampe de la pièce n'est dimmable */
+      const flat = room.flatLights || room.lights;
+      if (!flat.some((l) => l.dimmable)) return;
       let delta = null;
       if (c.gesture === "horizontal") {
         if (Math.abs(dx) < 6) return;
@@ -1004,7 +1007,7 @@ class HueLightsCard extends HTMLElement {
             <div class="rname">${esc(room.name)}</div>
             <div class="sw ${room.on ? "on" : ""}" data-rsw="1"><i></i></div>
           </div>
-          ${room.lights.some((l) => l.dimmable)
+          ${(room.flatLights || room.lights).some((l) => l.dimmable)
             ? `<div class="rslider"><div class="rfill" style="width:${room.pct}%"></div>
                <div class="rknob" style="left:${room.pct}%"></div></div>`
             : ""}
@@ -1042,7 +1045,7 @@ class HueLightsCard extends HTMLElement {
 
       <div class="rsec rowsec"><span>Lumières</span>
         ${
-          c.show_color_picker && room.lights.some((l) => l.colorable || l.kelvinable)
+          c.show_color_picker && (room.flatLights || room.lights).some((l) => l.colorable || l.kelvinable)
             ? `<span class="pill2" data-group="1">Couleur du groupe</span>`
             : ""
         }
