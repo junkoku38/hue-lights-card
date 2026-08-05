@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.5.1
+ * Hue Lights Card v2.5.2
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.5.1";
+const CARD_VERSION = "2.5.2";;
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
