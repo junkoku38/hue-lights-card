@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.6.3
+ * Hue Lights Card v2.7.0
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.6.3";
+const CARD_VERSION = "2.7.0";
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -273,6 +273,8 @@ class HueLightsCard extends HTMLElement {
       /* scènes */
       show_scenes: true,
       scene_match: ["area", "group", "overlap"],
+      scene_sort: "name", // name | recent
+      scene_colors: null, // palettes forcées : { "scene.x": ["#...", "#...", "#..."] }
       max_scenes: 12,
       scene_transition: 1,
       allow_scene_create: true,
@@ -554,14 +556,17 @@ class HueLightsCard extends HTMLElement {
         id,
         name: st.attributes?.friendly_name || id.split(".")[1],
         dynamic: !!st.attributes?.is_dynamic,
-        colors: this._sceneColors[id] || null,
+        colors: (c.scene_colors && c.scene_colors[id]) || this._sceneColors[id] || null,
         last: st.state && st.state !== "unknown" ? new Date(st.state).getTime() || 0 : 0,
       });
     });
 
-    return out
-      .sort((a, b) => b.last - a.last || a.name.localeCompare(b.name))
-      .slice(0, c.max_scenes);
+    /* Tri stable par défaut : la grille ne se réorganise pas à chaque activation. */
+    const bySort =
+      c.scene_sort === "recent"
+        ? (a, b) => b.last - a.last || a.name.localeCompare(b.name)
+        : (a, b) => a.name.localeCompare(b.name);
+    return out.sort(bySort).slice(0, c.max_scenes);
   }
 
   _gradient(room) {
@@ -740,7 +745,11 @@ class HueLightsCard extends HTMLElement {
     if (c.learn_scene_colors) this._learnSceneColors(scene, room);
   }
 
-  /** Après activation, relit les couleurs obtenues et les mémorise. */
+  /**
+   * Après activation, relit les couleurs obtenues et les mémorise.
+   * On reprend la teinte réelle de chaque lampe mais à pleine luminosité :
+   * une scène tamisée donnerait sinon une pastille presque noire.
+   */
   _learnSceneColors(scene, room) {
     const delay = (this._config.scene_transition || 1) * 1000 + 900;
     setTimeout(() => {
@@ -748,10 +757,33 @@ class HueLightsCard extends HTMLElement {
       this._invalidate();
       const fresh = this._room(room.key);
       if (!fresh || !fresh.on) return;
-      this._sceneColors[scene.id] = fresh.colors.slice(0, 3);
+      const cols = (fresh.flatLights || [])
+        .filter((l) => l.on)
+        .map((l) => {
+          const [h, sat] = this._lightHS(l);
+          return rgbStr(hsvToRgb(h, Math.max(0.35, sat), 1));
+        });
+      if (!cols.length) return;
+      while (cols.length < 3) cols.push(cols[cols.length - 1]);
+      this._sceneColors[scene.id] = cols.slice(0, 3);
       saveSceneColors(this._sceneColors);
       this._update();
     }, delay);
+  }
+
+  /** Suppression d'une scène créée par la carte. */
+  _confirmDeleteScene(id) {
+    const name = this._hass.states[id]?.attributes?.friendly_name || id;
+    if (!this._hass.services?.scene?.delete) {
+      this._showUndo(`« ${name} » ne peut pas être supprimée depuis la carte`, null);
+      return;
+    }
+    if (!window.confirm(`Supprimer la scène « ${name} » ?`)) return;
+    this._hass.callService("scene", "delete", { entity_id: id });
+    delete this._sceneColors[id];
+    saveSceneColors(this._sceneColors);
+    this._invalidate();
+    this._update();
   }
 
   _createScene(room, name) {
@@ -1160,7 +1192,7 @@ class HueLightsCard extends HTMLElement {
                        (s) => `<div class="scn" data-s="${esc(s.id)}">
                          <div class="scdot" style="background:${
                            s.colors
-                             ? `linear-gradient(135deg,${s.colors.join(",")})`
+                             ? `conic-gradient(from 210deg,${s.colors.join(",")},${s.colors[0]})`
                              : "rgba(255,255,255,.10)"
                          }">${
                          s.colors
@@ -1234,12 +1266,34 @@ class HueLightsCard extends HTMLElement {
       });
     }
 
-    host.querySelectorAll(".scn").forEach((el) =>
-      el.addEventListener("click", () => {
+    /* appui court : activer · appui long de 600 ms : supprimer */
+    host.querySelectorAll(".scn").forEach((el) => {
+      let lp = null;
+      el.addEventListener("pointerdown", () => {
+        lp = setTimeout(() => {
+          lp = "done";
+          el.classList.remove("press");
+          if (navigator.vibrate) navigator.vibrate(14);
+          this._confirmDeleteScene(el.dataset.s);
+        }, 600);
+        el.classList.add("press");
+      });
+      const clear = () => {
+        el.classList.remove("press");
+        if (lp && lp !== "done") clearTimeout(lp);
+      };
+      el.addEventListener("pointerup", () => {
+        if (lp === "done") {
+          lp = null;
+          return;
+        }
+        clear();
         const sc = scenes.find((s) => s.id === el.dataset.s);
         if (sc) this._activateScene(sc, room);
-      })
-    );
+      });
+      el.addEventListener("pointercancel", clear);
+      el.addEventListener("pointerleave", clear);
+    });
 
     host.querySelector("[data-group]")?.addEventListener("click", () => {
       this._sel = new Set(room.ids);
@@ -1638,8 +1692,8 @@ ha-card.transparent .toast{left:0;right:0;bottom:0;}
 .tl.drag{transform:scale(1.02);box-shadow:0 8px 26px rgba(0,0,0,.5);z-index:2;}
 .tl.armed{box-shadow:0 0 0 2px rgba(255,255,255,.55),0 8px 26px rgba(0,0,0,.5);}
 .tl.off{box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);}
-.tl .bg{position:absolute;inset:0;}
-.tl .scrim{position:absolute;inset:0;pointer-events:none;
+.tl .bg{position:absolute;inset:0;border-radius:inherit;}
+.tl .scrim{position:absolute;inset:0;pointer-events:none;border-radius:inherit;
   background:linear-gradient(to bottom,rgba(8,9,12,0) 35%,rgba(8,9,12,.45) 70%,rgba(8,9,12,.72) 100%);
   transition:opacity .2s;}
 .tl .em{position:absolute;left:0;right:0;top:0;background:rgba(8,9,12,.82);
@@ -1667,7 +1721,7 @@ ha-card.transparent .toast{left:0;right:0;bottom:0;}
 .rw.drag{transform:scale(1.01);box-shadow:0 8px 26px rgba(0,0,0,.5);z-index:2;}
 .rw.armed{box-shadow:0 0 0 2px rgba(255,255,255,.55);}
 .rw.off{box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);}
-.rw .bg,.rw .ov{position:absolute;inset:0;}
+.rw .bg,.rw .ov{position:absolute;inset:0;border-radius:inherit;}
 .rw .ct{position:relative;display:flex;align-items:center;gap:11px;padding:13px 14px 0;}
 .rw .ic{width:26px;height:26px;flex-shrink:0;display:flex;align-items:center;
   justify-content:center;pointer-events:none;}
@@ -1712,7 +1766,7 @@ ha-card.transparent .toast{left:0;right:0;bottom:0;}
 /* ---- vue pièce ---- */
 .rhead{position:relative;border-radius:18px;overflow:hidden;padding:14px 15px 16px;
   clip-path:inset(0 round 18px);}
-.rhbg,.rhov{position:absolute;inset:0;}
+.rhbg,.rhov{position:absolute;inset:0;border-radius:inherit;}
 .rhct{position:relative;}
 .rhtop{display:flex;align-items:center;gap:10px;}
 .rback{width:34px;height:34px;border-radius:50%;flex-shrink:0;cursor:pointer;
@@ -1739,6 +1793,8 @@ ha-card.transparent .toast{left:0;right:0;bottom:0;}
 .scn{position:relative;background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.06);
   border-radius:15px;padding:13px 6px 11px;text-align:center;cursor:pointer;transition:.15s;}
 .scn:hover{background:rgba(255,255,255,.09);}
+.scn.press{transform:scale(.94);transition:transform .55s ease-out;}
+.scn .scdot{transition:transform .2s;}
 .sdot{width:50px;height:50px;border-radius:50%;margin:0 auto;
   display:flex;align-items:center;justify-content:center;
   box-shadow:0 4px 14px rgba(0,0,0,.4);}
@@ -1754,8 +1810,8 @@ ha-card.transparent .toast{left:0;right:0;bottom:0;}
   min-height:132px;cursor:pointer;transition:transform .12s;
   clip-path:inset(0 round 15px);--pad:13px;}
 .lt:active{transform:scale(.98);}
-.ltbg,.ltov{position:absolute;inset:0;}
-.lt .scrim{position:absolute;inset:0;pointer-events:none;
+.ltbg,.ltov{position:absolute;inset:0;border-radius:inherit;}
+.lt .scrim{position:absolute;inset:0;pointer-events:none;border-radius:inherit;
   background:linear-gradient(to bottom,rgba(8,9,12,0) 40%,rgba(8,9,12,.5) 100%);}
 .ltct{position:relative;min-height:132px;display:flex;flex-direction:column;
   justify-content:space-between;padding:var(--pad) var(--pad) 0;}
@@ -1977,6 +2033,13 @@ class HueLightsCardEditor extends HTMLElement {
               <div class="tx"><b>Enregistrement de scènes</b>
                 <span>Capture l'état des lampes via scene.create.</span></div></div>
           </div></div>
+
+        <div class="grp scmatch"><label class="lb">Ordre des scènes</label>
+          <div class="seg small" data-k="scene_sort">
+            <div class="sg" data-v="name">Alphabétique</div>
+            <div class="sg" data-v="recent">Dernière utilisée</div></div>
+          <div class="hint">L'ordre alphabétique reste stable : la grille ne se réorganise
+            pas après chaque activation. Appui long sur une scène pour la supprimer.</div></div>
 
         <div class="grp scmatch"><label class="lb">Rattachement des scènes</label>
           <div class="chips" data-k="scene_match">
