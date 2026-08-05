@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.6.1
+ * Hue Lights Card v2.6.2
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.6.1";;;;;
+const CARD_VERSION = "2.6.2";;;;;;
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -1736,24 +1736,26 @@ ha-card.transparent{
 .scn .dyn{display:block;font-style:normal;font-size:8px;letter-spacing:.6px;
   text-transform:uppercase;color:rgba(255,255,255,.3);margin-top:3px;}
 .lights{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;}
-.lt{position:relative;border-radius:15px;min-height:132px;height:auto;cursor:pointer;
-  transition:transform .12s;
-  clip-path:inset(0 round 15px);}
+.lt{position:relative;border-radius:15px;overflow:hidden;
+  min-height:132px;cursor:pointer;transition:transform .12s;
+  clip-path:inset(0 round 15px);--pad:13px;}
 .lt:active{transform:scale(.98);}
 .ltbg,.ltov{position:absolute;inset:0;}
 .lt .scrim{position:absolute;inset:0;pointer-events:none;
   background:linear-gradient(to bottom,rgba(8,9,12,0) 40%,rgba(8,9,12,.5) 100%);}
-.ltct{position:relative;min-height:132px;height:auto;display:flex;flex-direction:column;
-  justify-content:space-between;padding:13px 13px 0;}
+.ltct{position:relative;min-height:132px;display:flex;flex-direction:column;
+  justify-content:space-between;padding:var(--pad) var(--pad) 0;}
 .ltic svg{width:24px;height:24px;fill:rgba(255,255,255,.95);
   filter:drop-shadow(0 1px 4px rgba(0,0,0,.4));}
 .lt.off .ltic svg{fill:rgba(255,255,255,.4);}
 .ltn{font-size:12.5px;font-weight:600;line-height:1.3;
-  text-shadow:0 1px 4px rgba(0,0,0,.45);}
+  text-shadow:0 1px 4px rgba(0,0,0,.45);
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+  overflow:hidden;word-break:break-word;}
 .ltn small{font-size:10px;font-weight:400;opacity:.55;}
 .lt.off .ltn{color:rgba(255,255,255,.55);}
-.ltbar{margin:10px -13px 0;padding:10px 13px 12px;
-  border-top:1px solid rgba(255,255,255,.16);}
+.ltbar{margin:10px calc(var(--pad) * -1) 0;padding:10px var(--pad) 12px;
+  flex-shrink:0;border-top:1px solid rgba(255,255,255,.16);}
 .ltsw{width:44px;height:26px;border-radius:14px;background:rgba(0,0,0,.3);
   border:1px solid rgba(255,255,255,.2);position:relative;cursor:pointer;}
 .ltsw i{position:absolute;top:2.5px;left:3px;width:19px;height:19px;border-radius:50%;
@@ -1812,11 +1814,12 @@ ha-card.transparent{
 .cpsel{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:20px;}
 .cpsl{font-size:10.5px;color:rgba(255,255,255,.5);}
 .cplights{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:9px;}
-.cpl{position:relative;border-radius:15px;overflow:hidden;height:112px;cursor:pointer;
-  border:2px solid transparent;transition:.15s;}
+.cpl{position:relative;border-radius:15px;overflow:hidden;
+  min-height:112px;cursor:pointer;border:2px solid transparent;
+  transition:.15s;clip-path:inset(0 round 15px);--pad:12px;}
 .cpl.sel{border-color:#fff;}
 .cpl:not(.sel){opacity:.5;}
-.cpl .ltct{padding:11px 12px 0;}
+.cpl .ltct{padding:11px var(--pad) 0;min-height:104px;}
 .cpcheck{position:absolute;top:9px;right:9px;width:19px;height:19px;border-radius:50%;
   border:1.6px solid rgba(255,255,255,.6);display:flex;align-items:center;
   justify-content:center;background:rgba(0,0,0,.25);z-index:2;}
