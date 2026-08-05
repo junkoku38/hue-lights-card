@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.4.3
+ * Hue Lights Card v2.4.4
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.4.3";
+const CARD_VERSION = "2.4.4";
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -1160,6 +1160,19 @@ class HueLightsCard extends HTMLElement {
         const id = el.dataset.l;
         if (onSw) {
           this._toggle([id]);
+          /* Mise à jour visuelle immédiate du commutateur */
+          const swEl = el.querySelector("[data-lsw]");
+          if (swEl) {
+            const light = room.lights.find((l) => l.id === id)
+              || (room.flatLights || []).find((l) => l.id === id);
+            if (light) {
+              const newOn = !light.on;
+              swEl.classList.toggle("on", newOn);
+              light.on = newOn;
+            }
+          }
+          this._sig = "";
+          this._dirty = true;
           return;
         }
         if (!this._config.show_color_picker) {
@@ -1300,6 +1313,16 @@ class HueLightsCard extends HTMLElement {
       sw.addEventListener("click", (e) => {
         e.stopPropagation();
         this._toggle([sw.dataset.clsw]);
+        /* Mise à jour visuelle immédiate du commutateur */
+        const light = lights.find((l) => l.id === sw.dataset.clsw);
+        if (light) {
+          const newOn = !light.on;
+          sw.classList.toggle("on", newOn);
+          light.on = newOn;
+        }
+        /* Force un re-render au prochain cycle hass */
+        this._sig = "";
+        this._dirty = true;
       })
     );
 
