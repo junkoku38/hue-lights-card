@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.5.8
+ * Hue Lights Card v2.5.9
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.5.8";;
+const CARD_VERSION = "2.5.9";;;
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -1036,11 +1036,13 @@ class HueLightsCard extends HTMLElement {
       });
       slEl.addEventListener("pointermove", (e) => {
         if (!slDrag) return;
+        e.stopPropagation();
         const v = slFromX(e.clientX);
         slPaint(v);
         pct = v;
       });
       slEl.addEventListener("pointerup", (e) => {
+        e.stopPropagation();
         if (!slDrag) return;
         slDrag = false;
         this._interacting = false;
@@ -1054,7 +1056,8 @@ class HueLightsCard extends HTMLElement {
         }, 2500);
         this._setBrightness(room.on ? room.onIds : room.ids, v);
       });
-      slEl.addEventListener("pointercancel", () => {
+      slEl.addEventListener("pointercancel", (e) => {
+        e.stopPropagation();
         slDrag = false;
         this._interacting = false;
         el.classList.remove("drag");
