@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.4.2
+ * Hue Lights Card v2.4.3
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.4.2";
+const CARD_VERSION = "2.4.3";
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -422,14 +422,51 @@ class HueLightsCard extends HTMLElement {
           : 0;
         const colors = on.map((l) => l.color);
         while (colors.length && colors.length < 3) colors.push(colors[colors.length - 1]);
+        /* Aplatir les membres : si une lampe est un groupe, on utilise
+           ses membres à la place pour ids/onIds (commander les ampoules réelles). */
+        const flatLights = r.lights.flatMap((l) => {
+          if (l.isGroup && l.members) {
+            return l.members.map((mid) => {
+              const mst = this._hass.states[mid];
+              if (!mst || mst.state === "unavailable") return null;
+              return {
+                id: mid,
+                st: mst,
+                name: mst.attributes?.friendly_name || mid,
+                on: mst.state === "on",
+                pct: mst.attributes?.brightness != null
+                  ? Math.round((mst.attributes.brightness / 255) * 100)
+                  : mst.state === "on" ? 100 : 0,
+                color: lightColor(mst),
+                isSwitch: false,
+                isGroup: false,
+                members: null,
+                dimmable: mst.attributes?.brightness != null
+                  || (Array.isArray(mst.attributes?.supported_color_modes) &&
+                      mst.attributes.supported_color_modes.some(m2 => ["brightness","dimmer","hs","rgb","rgbw","rgbww","xy","color_temp"].includes(m2))),
+                colorable: Array.isArray(mst.attributes?.hs_color) ||
+                  Array.isArray(mst.attributes?.rgb_color) ||
+                  (Array.isArray(mst.attributes?.supported_color_modes) &&
+                   mst.attributes.supported_color_modes.some(m2 => ["hs","rgb","rgbw","rgbww","xy"].includes(m2))),
+                kelvinable: mst.attributes?.color_temp_kelvin != null ||
+                  (Array.isArray(mst.attributes?.supported_color_modes) &&
+                   mst.attributes.supported_color_modes.includes("color_temp")),
+              };
+            }).filter(Boolean);
+          }
+          return [l];
+        });
+        const flatOn = flatLights.filter((l) => l.on);
         return {
           ...r,
+          lights: r.lights,
+          flatLights,
           on: on.length,
           total: r.lights.length,
           pct: this._pending.has(r.key) ? this._pending.get(r.key) : pct,
           colors: colors.slice(0, 3),
-          ids: r.lights.map((l) => l.id),
-          onIds: on.map((l) => l.id),
+          ids: flatLights.map((l) => l.id),
+          onIds: flatOn.map((l) => l.id),
         };
       })
       .sort((a, b) => b.on - a.on || a.name.localeCompare(b.name));
@@ -1163,9 +1200,10 @@ class HueLightsCard extends HTMLElement {
   _renderColor(host) {
     const room = this._room(this._roomKey);
     if (!room) return this._go("grid");
-    const sel = room.lights.filter((l) => this._sel.has(l.id));
+    const lights = room.flatLights || room.lights;
+    const sel = lights.filter((l) => this._sel.has(l.id));
     if (!sel.length) {
-      this._sel = new Set([room.lights[0].id]);
+      this._sel = new Set([lights[0].id]);
       return this._renderColor(host);
     }
     const ref = sel[0];
@@ -1181,7 +1219,7 @@ class HueLightsCard extends HTMLElement {
     const mode = this._mode || rmode;
     const [kLo, kHi] = this._kelvinRange(sel);
     const avg = Math.round(sel.reduce((a, b) => a + b.pct, 0) / sel.length) || 100;
-    const allSel = sel.length === room.lights.length;
+    const allSel = sel.length === lights.length;
     /* Capacités de la sélection */
     const anyColorable = sel.some((l) => l.colorable || l.kelvinable);
     const anyDimmable = sel.some((l) => l.dimmable);
@@ -1221,7 +1259,7 @@ class HueLightsCard extends HTMLElement {
       </div>
       <div class="cpsel"><span class="cpsl">Appliquer à</span>
         <span class="pill2 ${allSel ? "on" : ""}" data-all="1">Toutes les lampes</span></div>
-      <div class="cplights">${room.lights
+      <div class="cplights">${lights
         .map((l) => {
           const d = l.on ? Math.max(0, 1 - (l.pct / 100) * 0.8) : 0;
           return `<div class="cpl ${this._sel.has(l.id) ? "sel" : ""}" data-cl="${esc(l.id)}">
@@ -1300,7 +1338,7 @@ class HueLightsCard extends HTMLElement {
             ? mixWhite(kelvinToRgb(hueToKelvin(curH, kLo, kHi)), 1 - curS)
             : rgbStr(hsvToRgb(curH, curS, 1));
         pin.querySelector("path").setAttribute("fill", col);
-        dots.innerHTML = room.lights
+        dots.innerHTML = lights
           .filter((l) => l.on && l.id !== ref.id && (l.colorable || l.kelvinable))
           .map((l) => {
             const [h2, s2] = this._lightHS(l);
