@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.4.0
+ * Hue Lights Card v2.4.1
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.4.0";
+const CARD_VERSION = "2.4.1";
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -1019,7 +1019,7 @@ class HueLightsCard extends HTMLElement {
           const groupBadge = l.isGroup
             ? `<div class="grp-badge"><svg viewBox="0 0 24 24"><path d="M12 2a7 7 0 0 0-4 12.7V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.3A7 7 0 0 0 12 2zm-2 19h4v.5a1.5 1.5 0 0 1-1.5 1.5h-1A1.5 1.5 0 0 1 10 21.5V21z" fill="currentColor"/><circle cx="6" cy="8" r="1.5" fill="currentColor" opacity=".5"/><circle cx="18" cy="8" r="1.5" fill="currentColor" opacity=".5"/><circle cx="5" cy="14" r="1.2" fill="currentColor" opacity=".4"/><circle cx="19" cy="14" r="1.2" fill="currentColor" opacity=".4"/></svg></div>`
             : "";
-          return `<div class="lt ${l.on ? "on" : "off"} ${l.isGroup ? "is-group" : ""}" data-l="${esc(l.id)}">
+          let html = `<div class="lt ${l.on ? "on" : "off"} ${l.isGroup ? "is-group" : ""}" data-l="${esc(l.id)}">
             <div class="ltbg" style="background:${l.on ? l.color : "#2a2e36"}"></div>
             <div class="ltov" style="background:rgba(8,9,12,${d.toFixed(2)})"></div>
             <div class="scrim" style="opacity:${l.on ? this._dim({colors:[l.color],on:true}).toFixed(2) : 0}"></div>
@@ -1031,6 +1031,32 @@ class HueLightsCard extends HTMLElement {
             esc(l.id)
           }"><i></i></div></div>
             </div></div>`;
+          /* Sous-vignettes des membres d'un groupe */
+          if (l.isGroup && l.members) {
+            const memLights = l.members
+              .map((mid) => {
+                const mst = this._hass.states[mid];
+                if (!mst || mst.state === "unavailable") return null;
+                const md = mst.state === "on" ? Math.max(0, 1 - ((mst.attributes?.brightness || 255) / 255) * 0.8) : 0;
+                return { mid, mst, md };
+              })
+              .filter(Boolean);
+            if (memLights.length) {
+              html += `<div class="grp-members">${memLights.map((m) => {
+                const mColor = m.mst.state === "on" ? lightColor(m.mst) : "#2a2e36";
+                return `<div class="lt lt-sub ${m.mst.state === "on" ? "on" : "off"}" data-l="${esc(m.mid)}">
+                  <div class="ltbg" style="background:${mColor}"></div>
+                  <div class="ltov" style="background:rgba(8,9,12,${m.md.toFixed(2)})"></div>
+                  <div class="scrim" style="opacity:${m.mst.state === "on" ? this._dim({colors:[mColor],on:true}).toFixed(2) : 0}"></div>
+                  <div class="ltct">
+                    <div class="ltic"><svg viewBox="0 0 24 24">${ICONS.bulb}</svg></div>
+                    <div class="ltn">${esc(m.mst.attributes?.friendly_name || m.mid)}</div>
+                    <div class="ltbar"><div class="ltsw ${m.mst.state === "on" ? "on" : ""}" data-lsw="${esc(m.mid)}"><i></i></div></div>
+                  </div></div>`;
+              }).join("")}</div>`;
+            }
+          }
+          return html;
         })
         .join("")}</div>`;
 
@@ -1105,12 +1131,6 @@ class HueLightsCard extends HTMLElement {
           return;
         }
         if (!this._config.show_color_picker) {
-          fireEvent(this, "hass-more-info", { entityId: id });
-          return;
-        }
-        const light = room.lights.find((l) => l.id === id);
-        /* Un groupe Hue ouvre sa fiche HA native (qui déplie les membres) */
-        if (light && light.isGroup) {
           fireEvent(this, "hass-more-info", { entityId: id });
           return;
         }
@@ -1577,6 +1597,13 @@ ha-card.transparent{
   justify-content:center;z-index:2;pointer-events:none;}
 .grp-badge svg{width:14px;height:14px;fill:rgba(255,255,255,.8);}
 .lt.is-group{border:1px solid rgba(255,255,255,.12);}
+.grp-members{grid-column:1/-1;display:grid;grid-template-columns:repeat(2,1fr);
+  gap:6px;padding:0 4px 8px 24px;}
+.lt-sub{height:96px !important;border-radius:12px;}
+.lt-sub .ltic svg{width:18px;height:18px;}
+.lt-sub .ltn{font-size:11px;}
+.lt-sub .ltsw{transform:scale(.82);}
+.grp-members:empty{display:none;}
 .lt.off .grp-badge svg{fill:rgba(255,255,255,.35);}
   text-shadow:0 1px 4px rgba(0,0,0,.45);}
 .lt.off .ltn{color:rgba(255,255,255,.55);}
