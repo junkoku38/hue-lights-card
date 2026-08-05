@@ -1,8 +1,9 @@
 /**
- * Hue Lights Card v2.0.1
+ * Hue Lights Card v2.1.0
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
+ *   — OU sélection manuelle d'entités (entities: [light.x, light.y])
  *   — découverte des scènes réelles de Home Assistant (pièce, group_name, recoupement)
  *   — navigation : grille → pièce (scènes + lampes) → sélecteur de couleur
  *   — sélection multiple des lampes dans le sélecteur
@@ -12,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.0.1";
+const CARD_VERSION = "2.1.0";
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -239,6 +240,8 @@ class HueLightsCard extends HTMLElement {
       name: "Lumières",
       layout: "tiles",
       gesture: "horizontal",
+      entities: [],
+      group_by_area: true,
     };
   }
 
@@ -272,6 +275,13 @@ class HueLightsCard extends HTMLElement {
       /* filtres */
       exclude: [],
       areas: null,
+      /* sélection explicite : liste d'entity_id à afficher.
+         Si fourni, la découverte automatique est ignorée.
+         Les lumières sont regroupées par pièce comme d'habitude. */
+      entities: null,
+      /* Si true, chaque lumière est sa propre "pièce" (pas de regroupement).
+         Utile avec `entities` pour afficher des lampes éparses sans pièce commune. */
+      group_by_area: true,
       ...(config || {}),
     };
     if (typeof this._config.exclude === "string")
@@ -331,10 +341,20 @@ class HueLightsCard extends HTMLElement {
     const areaFilter = c.areas ? c.areas.map(norm) : null;
     const rooms = new Map();
 
-    Object.keys(hass.states).forEach((id) => {
-      if (!id.startsWith("light.")) return;
+    /* Liste d'entités à parcourir :
+       - `entities` explicite si fourni (sélection manuelle)
+       - sinon découverte automatique de toutes les light.* */
+    const candidateIds = c.entities && c.entities.length
+      ? c.entities.filter((id) => id && id.startsWith("light."))
+      : null;
+
+    const sourceIds = candidateIds
+      ? candidateIds
+      : Object.keys(hass.states).filter((id) => id.startsWith("light."));
+
+    sourceIds.forEach((id) => {
       const st = hass.states[id];
-      if (st.state === "unavailable") return;
+      if (!st || st.state === "unavailable") return;
       const reg = hass.entities?.[id];
       if (reg?.hidden || reg?.disabled_by) return;
       const label = norm(`${id} ${st.attributes?.friendly_name || ""}`);
@@ -342,15 +362,25 @@ class HueLightsCard extends HTMLElement {
 
       const areaId = areaOf(hass, id);
       const areaName = areaId ? hass.areas?.[areaId]?.name : null;
-      if (!areaId && !c.show_unassigned) return;
-      if (areaFilter) {
+      /* En mode sélection manuelle, on garde même les lampes sans pièce. */
+      if (!candidateIds && !areaId && !c.show_unassigned) return;
+      if (areaFilter && !candidateIds) {
         const an = norm(areaName || "");
         if (!areaFilter.includes(norm(areaId || "")) && !areaFilter.includes(an)) return;
       }
-      const key = areaId || "__none__";
-      if (!rooms.has(key))
-        rooms.set(key, { key, areaId, name: areaName || "Sans pièce", lights: [] });
-      rooms.get(key).lights.push({
+      /* Clé de regroupement : area si group_by_area, sinon l'id (1 lampe = 1 "pièce") */
+      const key = c.group_by_area ? (areaId || (candidateIds ? null : "__none__")) : `e:${id}`;
+      if (key === null && candidateIds) {
+        /* sans pièce + group_by_area true en mode manuel : groupe "Sans pièce" */
+      }
+      const gKey = key || "__none__";
+      if (!rooms.has(gKey)) {
+        const gName = !c.group_by_area
+          ? (st.attributes?.friendly_name || id)
+          : (areaName || "Sans pièce");
+        rooms.set(gKey, { key: gKey, areaId: c.group_by_area ? areaId : null, name: gName, lights: [] });
+      }
+      rooms.get(gKey).lights.push({
         id,
         st,
         name: st.attributes?.friendly_name || id,
@@ -1626,6 +1656,18 @@ class HueLightsCardEditor extends HTMLElement {
                 <span>Sinon l'appui sur une lampe ouvre sa fiche.</span></div></div>
           </div></div>
 
+        <div class="grp"><label class="lb">Lumières à afficher <small>entity_id séparés par des virgules</small></label>
+          <input class="txt" data-k="entities" type="text" placeholder="light.salon, light.cuisine">
+          <div class="hint">Liste explicite de lumières. Si rempli, ignore la découverte
+            automatique et le filtre par pièce.</div></div>
+
+        <div class="grp"><label class="lb">Regroupement</label>
+          <div class="sws">
+            <div class="row" data-k="group_by_area"><div class="sw"><i></i></div>
+              <div class="tx"><b>Regrouper par pièce</b>
+                <span>Sinon chaque lampe est sa propre tuige.</span></div></div>
+          </div></div>
+
         <div class="grp"><label class="lb">Exclure <small>motifs séparés par des virgules</small></label>
           <input class="txt" data-k="exclude" type="text" placeholder="veilleuse, ruban, test"></div>
 
@@ -1636,7 +1678,7 @@ class HueLightsCardEditor extends HTMLElement {
       inp.addEventListener("change", () => {
         const k = inp.dataset.k;
         let v = inp.type === "number" ? Number(inp.value) : inp.value;
-        if (k === "exclude")
+        if (k === "exclude" || k === "entities")
           v = String(inp.value)
             .split(",")
             .map((s) => s.trim())

@@ -36,6 +36,23 @@ show_scenes: true
 show_color_picker: true
 ```
 
+### Sélection manuelle de lumières
+
+Pour n'afficher que des lampes précises (pas toute la maison), utilise `entities` :
+
+```yaml
+type: custom:hue-lights-card
+name: Mes lampes
+entities:
+  - light.salon_plafond
+  - light.cuisine_plan
+  - light.chambre_veilleuse
+group_by_area: true   # true : regroupe par pièce ; false : une tuile par lampe
+```
+
+Si `entities` est rempli, la découverte automatique et le filtre `areas` sont ignorés.
+Avec `group_by_area: false`, chaque lampe est sa propre tuile (pas de regroupement).
+
 ### Options
 
 | Option | Type | Défaut | Description |
@@ -62,6 +79,8 @@ show_color_picker: true
 | `show_color_picker` | bool | `true` | Sélecteur de couleur |
 | `exclude` | list | `[]` | Motifs d'entités à exclure |
 | `areas` | list | `null` | Filtrer par area ID ou nom |
+| `entities` | list | `null` | Liste explicite d'entity_id (désactive la découverte auto) |
+| `group_by_area` | bool | `true` | Regrouper par pièce (false : une tuile par lampe) |
 
 ## Navigation
 
