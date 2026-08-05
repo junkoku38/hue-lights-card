@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.2.0
+ * Hue Lights Card v2.3.0
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.2.0";
+const CARD_VERSION = "2.3.0";
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -343,10 +343,11 @@ class HueLightsCard extends HTMLElement {
     const rooms = new Map();
 
     /* Liste d'entités à parcourir :
-       - `entities` explicite si fourni (sélection manuelle)
+       - `entities` explicite si fourni (sélection manuelle, light.* et switch.*)
        - sinon découverte automatique de toutes les light.* */
+    const isLightOrSwitch = (id) => id && (id.startsWith("light.") || id.startsWith("switch."));
     const candidateIds = c.entities && c.entities.length
-      ? c.entities.filter((id) => id && id.startsWith("light."))
+      ? c.entities.filter(isLightOrSwitch)
       : null;
 
     const sourceIds = candidateIds
@@ -487,6 +488,30 @@ class HueLightsCard extends HTMLElement {
 
   /* ================= Services ================= */
 
+  /** Sépare une liste d'entity_id par domaine (light. vs switch.). */
+  _splitByDomain(ids) {
+    const lights = [];
+    const switches = [];
+    for (const id of ids) {
+      if (id.startsWith("switch.")) switches.push(id);
+      else lights.push(id);
+    }
+    return { lights, switches };
+  }
+
+  /** Allume/éteint un mélange de light.* et switch.* */
+  _turn(ids, on) {
+    const { lights, switches } = this._splitByDomain(ids);
+    if (lights.length) this._hass.callService("light", on ? "turn_on" : "turn_off", { entity_id: lights });
+    if (switches.length) this._hass.callService("switch", on ? "turn_on" : "turn_off", { entity_id: switches });
+  }
+
+  _toggle(ids) {
+    const { lights, switches } = this._splitByDomain(ids);
+    if (lights.length) this._hass.callService("light", "toggle", { entity_id: lights });
+    if (switches.length) this._hass.callService("switch", "toggle", { entity_id: switches });
+  }
+
   _snapshot(ids) {
     return ids.map((id) => {
       const st = this._hass.states[id];
@@ -503,9 +528,11 @@ class HueLightsCard extends HTMLElement {
   _restore(snap) {
     snap.forEach((s) => {
       if (s.state !== "on") {
-        this._hass.callService("light", "turn_off", { entity_id: s.id });
+        this._turn([s.id], false);
         return;
       }
+      const isSwitch = s.id.startsWith("switch.");
+      if (isSwitch) { this._turn([s.id], true); return; }
       const data = { entity_id: s.id };
       if (s.brightness != null) data.brightness = s.brightness;
       if (s.hs_color) data.hs_color = s.hs_color;
@@ -516,24 +543,28 @@ class HueLightsCard extends HTMLElement {
 
   _toggleRoom(room) {
     const snap = this._snapshot(room.ids);
-    if (room.on) this._hass.callService("light", "turn_off", { entity_id: room.ids });
-    else this._hass.callService("light", "turn_on", { entity_id: room.ids });
+    this._turn(room.ids, !room.on);
     this._showUndo(`${room.name} ${room.on ? "éteinte" : "allumée"}`, () => this._restore(snap));
   }
 
   _setBrightness(ids, pct) {
     if (!ids.length) return;
-    if (pct <= 0) this._hass.callService("light", "turn_off", { entity_id: ids });
-    else
-      this._hass.callService("light", "turn_on", {
-        entity_id: ids,
-        brightness_pct: Math.round(pct),
-      });
+    const { lights, switches } = this._splitByDomain(ids);
+    if (pct <= 0) {
+      this._turn(ids, false);
+      return;
+    }
+    if (lights.length)
+      this._hass.callService("light", "turn_on", { entity_id: lights, brightness_pct: Math.round(pct) });
+    if (switches.length)
+      this._hass.callService("switch", "turn_on", { entity_id: switches });
   }
 
   _setColor(ids, payload) {
     if (!ids.length) return;
-    this._hass.callService("light", "turn_on", { entity_id: ids, ...payload });
+    const { lights, switches } = this._splitByDomain(ids);
+    if (lights.length) this._hass.callService("light", "turn_on", { entity_id: lights, ...payload });
+    if (switches.length) this._hass.callService("switch", "turn_on", { entity_id: switches });
   }
 
   _allOff() {
@@ -541,7 +572,7 @@ class HueLightsCard extends HTMLElement {
     if (!rooms.length) return;
     const ids = rooms.flatMap((r) => r.onIds);
     const snap = this._snapshot(ids);
-    this._hass.callService("light", "turn_off", { entity_id: ids });
+    this._turn(ids, false);
     this._showUndo("Toutes les lumières éteintes", () => this._restore(snap));
   }
 
@@ -1013,7 +1044,7 @@ class HueLightsCard extends HTMLElement {
         if (moved > 10 || Date.now() - t0 < 60) return;
         const id = el.dataset.l;
         if (onSw) {
-          this._hass.callService("light", "toggle", { entity_id: id });
+          this._toggle([id]);
           return;
         }
         if (!this._config.show_color_picker) {
@@ -1148,7 +1179,7 @@ class HueLightsCard extends HTMLElement {
     host.querySelectorAll("[data-clsw]").forEach((sw) =>
       sw.addEventListener("click", (e) => {
         e.stopPropagation();
-        this._hass.callService("light", "toggle", { entity_id: sw.dataset.clsw });
+        this._toggle([sw.dataset.clsw]);
       })
     );
 
@@ -1703,10 +1734,10 @@ class HueLightsCardEditor extends HTMLElement {
                 <span>Sinon l'appui sur une lampe ouvre sa fiche.</span></div></div>
           </div></div>
 
-        <div class="grp"><label class="lb">Lumières à afficher <small>entity_id séparés par des virgules</small></label>
-          <input class="txt" data-k="entities" type="text" placeholder="light.salon, light.cuisine">
-          <div class="hint">Liste explicite de lumières. Si rempli, ignore la découverte
-            automatique et le filtre par pièce.</div></div>
+        <div class="grp"><label class="lb">Lumières à afficher</label>
+          <div class="picker" data-k="entities"></div>
+          <div class="hint">Sélection manuelle de lumières et prises. Si rempli, ignore la
+            découverte automatique et le filtre par pièce.</div></div>
 
         <div class="grp"><label class="lb">Regroupement</label>
           <div class="sws">
@@ -1725,7 +1756,7 @@ class HueLightsCardEditor extends HTMLElement {
       inp.addEventListener("change", () => {
         const k = inp.dataset.k;
         let v = inp.type === "number" ? Number(inp.value) : inp.value;
-        if (k === "exclude" || k === "entities")
+        if (k === "exclude")
           v = String(inp.value)
             .split(",")
             .map((s) => s.trim())
@@ -1733,6 +1764,31 @@ class HueLightsCardEditor extends HTMLElement {
         this._set(k, v);
       })
     );
+    /* Sélecteur d'entités (ha-entities-picker) pour le champ entities */
+    sr.querySelectorAll(".picker").forEach((el) => {
+      const k = el.dataset.k;
+      const picker = document.createElement("ha-entity-picker");
+      picker.setAttribute("label", "Ajouter une entité");
+      picker.hass = this._hass;
+      picker.includeDomains = ["light", "switch"];
+      picker.allowCustomEntity = true;
+      picker.value = "";
+      picker.addEventListener("value-changed", (ev) => {
+        const val = ev.detail.value;
+        if (!val) return;
+        const list = Array.isArray(this._config[k]) ? [...this._config[k]] : [];
+        if (!list.includes(val)) {
+          list.push(val);
+          this._set(k, list);
+        }
+        picker.value = "";
+      });
+      el.appendChild(picker);
+      /* Zone pour afficher les entités sélectionnées avec bouton remove */
+      const chips = document.createElement("div");
+      chips.className = "ent-chips";
+      el.appendChild(chips);
+    });
     sr.querySelectorAll(".seg").forEach((seg) =>
       seg.querySelectorAll(".sg").forEach((sg) =>
         sg.addEventListener("click", () =>
@@ -1788,6 +1844,23 @@ class HueLightsCardEditor extends HTMLElement {
       vertical_hold: "Maintenir arme la surface, puis le glissement vertical règle l'intensité.",
       none: "Aucun réglage au doigt : seuls la bascule et la navigation restent.",
     }[c.gesture];
+    /* Affiche les entités sélectionnées comme chips cliquables (remove) */
+    sr.querySelectorAll(".picker").forEach((el) => {
+      const k = el.dataset.k;
+      const chips = el.querySelector(".ent-chips");
+      if (!chips) return;
+      const list = Array.isArray(c[k]) ? c[k] : [];
+      chips.innerHTML = list.map((eid) => {
+        const fn = this._hass?.states?.[eid]?.attributes?.friendly_name || eid;
+        return `<div class="ent-chip" data-eid="${esc(eid)}">${esc(fn)} <span class="ent-x">✕</span></div>`;
+      }).join("");
+      chips.querySelectorAll(".ent-chip").forEach((chip) =>
+        chip.addEventListener("click", () => {
+          const eid = chip.dataset.eid;
+          this._set(k, list.filter((x) => x !== eid));
+        })
+      );
+    });
   }
 }
 
@@ -1797,6 +1870,16 @@ HueLightsCardEditor.styles = `
 .ed{display:flex;flex-direction:column;gap:20px;padding:4px 2px 8px;
   font-family:var(--primary-font-family,"Inter","Segoe UI",Roboto,sans-serif);
   color:var(--primary-text-color,#e8ecf3);}
+.picker{display:flex;flex-direction:column;gap:8px;}
+.ent-chips{display:flex;flex-wrap:wrap;gap:6px;min-height:4px;}
+.ent-chip{font-size:11.5px;font-weight:600;padding:7px 10px;border-radius:10px;cursor:pointer;
+  background:color-mix(in srgb,var(--primary-color,#3b82f6) 12%,transparent);
+  border:1px solid color-mix(in srgb,var(--primary-color,#3b82f6) 30%,transparent);
+  color:var(--primary-text-color,#e8ecf3);display:flex;align-items:center;gap:6px;
+  transition:.15s;}
+.ent-chip:hover{background:color-mix(in srgb,var(--primary-color,#3b82f6) 20%,transparent);}
+.ent-chip .ent-x{opacity:.5;font-size:13px;}
+.ent-chip:hover .ent-x{opacity:1;}
 .grp{display:flex;flex-direction:column;gap:8px;}
 .grp.two{flex-direction:row;gap:10px;}
 .grp.two > div{flex:1;display:flex;flex-direction:column;gap:8px;}
