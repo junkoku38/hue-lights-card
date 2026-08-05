@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.1.2
+ * Hue Lights Card v2.2.0
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.1.2";
+const CARD_VERSION = "2.2.0";
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -254,6 +254,7 @@ class HueLightsCard extends HTMLElement {
       show_header: true,
       show_off: true,
       show_unassigned: false,
+      transparent: false,
       /* gestes */
       gesture: "horizontal", // horizontal | vertical_hold | none
       hold_ms: 220,
@@ -619,8 +620,9 @@ class HueLightsCard extends HTMLElement {
   /* ================= Construction ================= */
 
   _build() {
+    const tr = this._config.transparent ? " transparent" : "";
     this.shadowRoot.innerHTML = `<style>${HueLightsCard.styles}</style>
-      <ha-card>
+      <ha-card class="${tr}">
         <div class="view"></div>
         <div class="toast"><span class="tt">—</span>
           <span class="tu">Annuler</span><span class="bar"></span></div>
@@ -1318,6 +1320,11 @@ ha-card{
   padding:16px 14px 14px;color:#eef1f6;position:relative;overflow:hidden;
   font-family:var(--primary-font-family,"Inter","Segoe UI",Roboto,sans-serif);
 }
+/* mode transparent : fond invisible, bordure invisible, padding réduit */
+ha-card.transparent{
+  background:transparent !important;border:none !important;
+  padding:0;box-shadow:none !important;
+}
 
 /* ---- en-tête grille ---- */
 .hd{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:2px 4px 0;}
@@ -1685,6 +1692,8 @@ class HueLightsCardEditor extends HTMLElement {
           <div class="sws">
             <div class="row" data-k="show_header"><div class="sw"><i></i></div>
               <div class="tx"><b>En-tête</b><span>Titre et interrupteur général.</span></div></div>
+            <div class="row" data-k="transparent"><div class="sw"><i></i></div>
+              <div class="tx"><b>Carte transparente</b><span>Fond et bordure invisibles, vignettes seules.</span></div></div>
             <div class="row" data-k="show_off"><div class="sw"><i></i></div>
               <div class="tx"><b>Pièces éteintes</b><span>Sinon seules les allumées.</span></div></div>
             <div class="row" data-k="show_unassigned"><div class="sw"><i></i></div>
