@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.4.8
+ * Hue Lights Card v2.5.0
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.4.8";
+const CARD_VERSION = "2.5.0";
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -251,6 +251,8 @@ class HueLightsCard extends HTMLElement {
       /* affichage */
       layout: "tiles", // tiles | rows
       columns: 2,
+      sort: "auto", // auto | manual
+      order: null, // liste d'entity_id dans l'ordre souhaite (manual)
       show_header: true,
       show_off: true,
       show_unassigned: false,
@@ -471,7 +473,16 @@ class HueLightsCard extends HTMLElement {
           onIds: flatOn.map((l) => l.id),
         };
       })
-      .sort((a, b) => b.on - a.on || a.name.localeCompare(b.name));
+      .sort((a, b) => {
+        if (c.sort === "manual" && c.order) {
+          const ai = c.order.indexOf(a.ids[0]);
+          const bi = c.order.indexOf(b.ids[0]);
+          if (ai >= 0 && bi >= 0) return ai - bi;
+          if (ai >= 0) return -1;
+          if (bi >= 0) return 1;
+        }
+        return b.on - a.on || a.name.localeCompare(b.name);
+      });
   }
 
   /** Scènes rattachées à une pièce, par trois critères cumulables. */
@@ -1911,6 +1922,14 @@ class HueLightsCardEditor extends HTMLElement {
           <div class="hint">Sélection manuelle de lumières et prises. Si rempli, ignore la
             découverte automatique et le filtre par pièce.</div></div>
 
+        <div class="grp"><label class="lb">Ordre d'affichage</label>
+          <div class="seg small" data-k="sort">
+            <div class="sg" data-v="auto">Automatique</div>
+            <div class="sg" data-v="manual">Manuel</div></div>
+          <div class="reorder" id="reorder"></div>
+          <div class="hint">En mode manuel, réordonne les entités avec les flèches.
+            L'ordre suit la liste « Lumières à afficher ».</div></div>
+
         <div class="grp"><label class="lb">Regroupement</label>
           <div class="sws">
             <div class="row" data-k="group_by_area"><div class="sw"><i></i></div>
@@ -2033,6 +2052,42 @@ class HueLightsCardEditor extends HTMLElement {
         })
       );
     });
+    /* Liste réordonnable (mode manual) */
+    const reorder = sr.querySelector("#reorder");
+    if (reorder) {
+      const entities = Array.isArray(c.entities) ? c.entities : [];
+      const order = Array.isArray(c.order) ? c.order : entities;
+      // merge: entities not in order go at the end
+      const merged = [...order.filter((e) => entities.includes(e)),
+        ...entities.filter((e) => !order.includes(e))];
+      if (c.sort === "manual" && merged.length > 1) {
+        reorder.style.display = "";
+        reorder.innerHTML = merged.map((eid, i) => {
+          const fn = this._hass?.states?.[eid]?.attributes?.friendly_name || eid;
+          return `<div class="ro-item" data-eid="${esc(eid)}">
+            <span class="ro-name">${esc(fn)}</span>
+            <span class="ro-arrows">
+              <span class="ro-up" data-dir="-1" ${i === 0 ? 'style="opacity:.3;pointer-events:none"' : ''}>▲</span>
+              <span class="ro-down" data-dir="1" ${i === merged.length - 1 ? 'style="opacity:.3;pointer-events:none"' : ''}>▼</span>
+            </span></div>`;
+        }).join("");
+        reorder.querySelectorAll(".ro-up, .ro-down").forEach((btn) =>
+          btn.addEventListener("click", () => {
+            const item = btn.closest(".ro-item");
+            const eid = item.dataset.eid;
+            const dir = parseInt(btn.dataset.dir);
+            const idx = merged.indexOf(eid);
+            const ni = idx + dir;
+            if (ni < 0 || ni >= merged.length) return;
+            [merged[idx], merged[ni]] = [merged[ni], merged[idx]];
+            this._set("order", [...merged]);
+          })
+        );
+      } else {
+        reorder.style.display = "none";
+        reorder.innerHTML = "";
+      }
+    }
   }
 }
 
@@ -2043,6 +2098,16 @@ HueLightsCardEditor.styles = `
   font-family:var(--primary-font-family,"Inter","Segoe UI",Roboto,sans-serif);
   color:var(--primary-text-color,#e8ecf3);}
 .picker{display:flex;flex-direction:column;gap:8px;}
+.reorder{display:flex;flex-direction:column;gap:4px;margin-top:6px;}
+.ro-item{display:flex;align-items:center;justify-content:space-between;
+  padding:8px 10px;border-radius:8px;background:rgba(127,127,127,.08);
+  border:1px solid rgba(127,127,127,.14);font-size:12px;}
+.ro-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.ro-arrows{display:flex;gap:6px;flex-shrink:0;}
+.ro-up,.ro-down{cursor:pointer;font-size:11px;width:22px;height:22px;
+  display:flex;align-items:center;justify-content:center;border-radius:6px;
+  background:rgba(127,127,127,.16);}
+.ro-up:hover,.ro-down:hover{background:rgba(127,127,127,.3);}
 .ent-chips{display:flex;flex-wrap:wrap;gap:6px;min-height:4px;}
 .ent-chip{font-size:11.5px;font-weight:600;padding:7px 10px;border-radius:10px;cursor:pointer;
   background:color-mix(in srgb,var(--primary-color,#3b82f6) 12%,transparent);
