@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.1.1
+ * Hue Lights Card v2.1.2
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.1.1";
+const CARD_VERSION = "2.1.2";
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -469,6 +469,21 @@ class HueLightsCard extends HTMLElement {
     return `linear-gradient(120deg,${a} 0%,${b || a} 50%,${cc || b || a} 100%)`;
   }
 
+  /** Luminance perçue (0-1) d'une chaîne rgb(). */
+  _luminance(rgbStr) {
+    const m = rgbStr.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+    if (!m) return 0;
+    const [r, g, b] = [m[1], m[2], m[3]].map(Number);
+    return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  }
+
+  /** Overlay sombre selon la luminance : plus la couleur est claire, plus on assombrit. */
+  _dim(room) {
+    if (!room.on || !room.colors.length) return 0;
+    const avg = room.colors.reduce((a, c) => a + this._luminance(c), 0) / room.colors.length;
+    return Math.min(0.55, avg * 0.5);
+  }
+
   /* ================= Services ================= */
 
   _snapshot(ids) {
@@ -656,6 +671,7 @@ class HueLightsCard extends HTMLElement {
     const c = this._config;
     const grad = this._gradient(r);
     const dim = r.on ? Math.max(0, 1 - (r.pct / 100) * 0.9) : 0;
+    const lum = this._dim(r);
     const nameE = esc(r.name);
     const sub = r.on
       ? `${r.on} lumière${r.on > 1 ? "s" : ""} · ${r.pct} %`
@@ -663,7 +679,8 @@ class HueLightsCard extends HTMLElement {
     if (c.layout === "rows") {
       return `<div class="rw ${r.on ? "on" : "off"}" data-k="${esc(r.key)}">
         <div class="bg" style="background:${grad}"></div>
-        <div class="ov" style="background:rgba(8,9,12,${dim.toFixed(2)})"></div>
+        <div class="ov" style="background:rgba(8,9,12,${Math.max(dim, lum).toFixed(2)})"></div>
+        <div class="scrim"></div>
         <div class="ct">
           <div class="ic"><svg viewBox="0 0 24 24">${roomIcon(r.name)}</svg></div>
           <div class="tx"><b>${nameE}</b><span>${esc(sub)}</span></div>
@@ -677,6 +694,7 @@ class HueLightsCard extends HTMLElement {
     return `<div class="tl ${r.on ? "on" : "off"}" data-k="${esc(r.key)}">
       <div class="bg" style="background:${grad}"></div>
       <div class="em" style="height:${100 - r.pct}%"></div>
+      <div class="scrim" style="opacity:${lum.toFixed(2)}"></div>
       <div class="ct">
         <div class="top"><svg viewBox="0 0 24 24">${roomIcon(r.name)}</svg>
           <div class="sw ${r.on ? "on" : ""}" data-sw="1"><i></i></div></div>
@@ -917,6 +935,7 @@ class HueLightsCard extends HTMLElement {
           return `<div class="lt ${l.on ? "on" : "off"}" data-l="${esc(l.id)}">
             <div class="ltbg" style="background:${l.on ? l.color : "#2a2e36"}"></div>
             <div class="ltov" style="background:rgba(8,9,12,${d.toFixed(2)})"></div>
+            <div class="scrim" style="opacity:${l.on ? this._dim({colors:[l.color],on:true}).toFixed(2) : 0}"></div>
             <div class="ltct">
               <div class="ltic"><svg viewBox="0 0 24 24">${ICONS.bulb}</svg></div>
               <div class="ltn">${esc(l.name)}</div>
@@ -1321,6 +1340,9 @@ ha-card{
 .tl.armed{box-shadow:0 0 0 2px rgba(255,255,255,.55),0 8px 26px rgba(0,0,0,.5);}
 .tl.off{box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);}
 .tl .bg{position:absolute;inset:0;}
+.tl .scrim{position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(to bottom,rgba(8,9,12,0) 35%,rgba(8,9,12,.45) 70%,rgba(8,9,12,.72) 100%);
+  opacity:0;transition:opacity .2s;}
 .tl .em{position:absolute;left:0;right:0;top:0;background:rgba(8,9,12,.82);
   border-bottom:1px solid rgba(255,255,255,.16);transition:height .18s;}
 .tl.drag .em{transition:none;border-bottom-color:rgba(255,255,255,.55);}
@@ -1346,6 +1368,9 @@ ha-card{
 .rw.armed{box-shadow:0 0 0 2px rgba(255,255,255,.55);}
 .rw.off{box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);}
 .rw .bg,.rw .ov{position:absolute;inset:0;}
+.rw .scrim{position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(to right,rgba(8,9,12,.45) 0%,rgba(8,9,12,.15) 40%,rgba(8,9,12,.45) 100%);
+  opacity:0;transition:opacity .2s;}
 .rw .ct{position:relative;display:flex;align-items:center;gap:11px;padding:13px 14px 0;}
 .rw .ic{width:26px;height:26px;flex-shrink:0;display:flex;align-items:center;
   justify-content:center;pointer-events:none;}
@@ -1429,6 +1454,8 @@ ha-card{
   transition:transform .12s;}
 .lt:active{transform:scale(.98);}
 .ltbg,.ltov{position:absolute;inset:0;}
+.lt .scrim{position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(to bottom,rgba(8,9,12,0) 40%,rgba(8,9,12,.5) 100%);}
 .ltct{position:relative;height:100%;display:flex;flex-direction:column;
   justify-content:space-between;padding:13px 13px 0;}
 .ltic svg{width:24px;height:24px;fill:rgba(255,255,255,.95);
