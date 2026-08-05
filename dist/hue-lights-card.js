@@ -1,5 +1,5 @@
 /**
- * Hue Lights Card v2.5.5
+ * Hue Lights Card v2.5.6
  *
  * Pièces en dégradé façon Philips Hue, avec :
  *   — découverte automatique des lumières, regroupées par pièce
@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.5.5";;
+const CARD_VERSION = "2.5.6";;
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -1538,9 +1538,9 @@ ha-card.transparent{
 .body.rows{display:flex;flex-direction:column;gap:8px;}
 
 /* ---- vignettes ---- */
-.tl{position:relative;height:124px;border-radius:17px;overflow:hidden;
+.tl{position:relative;height:124px;border-radius:17px;
   touch-action:pan-y;user-select:none;-webkit-user-select:none;transition:transform .12s;
-  transform:translateZ(0);}
+  clip-path:inset(0 round 17px);}
 .tl.drag{transform:scale(1.02);box-shadow:0 8px 26px rgba(0,0,0,.5);z-index:2;}
 .tl.armed{box-shadow:0 0 0 2px rgba(255,255,255,.55),0 8px 26px rgba(0,0,0,.5);}
 .tl.off{box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);}
@@ -1567,9 +1567,9 @@ ha-card.transparent{
 .tl.off .bot span{color:rgba(255,255,255,.28);}
 
 /* ---- barres ---- */
-.rw{position:relative;height:84px;border-radius:16px;overflow:hidden;
+.rw{position:relative;height:84px;border-radius:16px;
   touch-action:pan-y;user-select:none;-webkit-user-select:none;transition:transform .12s;
-  transform:translateZ(0);}
+  clip-path:inset(0 round 16px);}
 .rw.drag{transform:scale(1.01);box-shadow:0 8px 26px rgba(0,0,0,.5);z-index:2;}
 .rw.armed{box-shadow:0 0 0 2px rgba(255,255,255,.55);}
 .rw.off{box-shadow:inset 0 0 0 1px rgba(255,255,255,.06);}
