@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.7.0";
+const CARD_VERSION = "2.7.1";
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
