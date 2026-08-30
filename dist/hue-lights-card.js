@@ -125,7 +125,7 @@ function lightColor(st) {
 const hueToKelvin = (h, lo, hi) => Math.round(lo + (hi - lo) * (1 - Math.abs(2 * (h / 360) - 1)));
 const kelvinToHue = (k, lo, hi) => {
   const f = clamp((k - lo) / (hi - lo), 0, 1);
-  return (1 - f) * 180; // moitié chaude de la roue par défaut
+  return f * 180; /* cohérent avec hueToKelvin : kelvin bas (chaud) → 0° */
 };
 
 /* ---- icônes ---- */
@@ -215,12 +215,21 @@ class HueLightsCard extends HTMLElement {
    * fois par seconde.
    */
   _relevantChanged(hass) {
-    const n = Object.keys(hass.states).length;
-    if (!this._watch || n !== this._watchCount) {
+    const keys = Object.keys(hass.states);
+    const n = keys.length;
+    /* Empreinte du registre : si une clé surveillance a disparu ou
+       qu'une nouvelle light/scene/switch existe, on reconstruit. */
+    const currentIds = keys.filter(
+      (id) => id.startsWith("light.") || id.startsWith("scene.") || id.startsWith("switch.")
+    );
+    if (
+      !this._watch ||
+      n !== this._watchCount ||
+      this._watch.length !== currentIds.length ||
+      currentIds.some((id) => !this._lastRefs.has(id))
+    ) {
       this._watchCount = n;
-      this._watch = Object.keys(hass.states).filter(
-        (id) => id.startsWith("light.") || id.startsWith("scene.") || id.startsWith("switch.")
-      );
+      this._watch = currentIds;
       this._lastRefs = new Map();
     }
     let changed = false;
@@ -453,7 +462,6 @@ class HueLightsCard extends HTMLElement {
 
     return [...rooms.values()]
       .map((r) => {
-        const on = r.lights.filter((l) => l.on);
         /* Aplatir les groupes : on pilote les ampoules réelles, pas l'entité groupe. */
         const flatLights = r.lights.flatMap((l) => {
           if (l.isGroup && l.members) {
@@ -492,8 +500,8 @@ class HueLightsCard extends HTMLElement {
         return {
           ...r,
           flatLights,
-          on: on.length,
-          total: r.lights.length,
+          on: flatOn.length,
+          total: flatLights.length,
           pct: this._pending.has(r.key) ? this._pending.get(r.key) : pct,
           colors: flatColors.slice(0, 3),
           ids: flatLights.map((l) => l.id),
@@ -556,7 +564,10 @@ class HueLightsCard extends HTMLElement {
         id,
         name: st.attributes?.friendly_name || id.split(".")[1],
         dynamic: !!st.attributes?.is_dynamic,
-        colors: (c.scene_colors && c.scene_colors[id]) || this._sceneColors[id] || null,
+        /* seules des couleurs hex valides sont injectées dans le CSS */
+        colors: this._safeColors(
+          (c.scene_colors && c.scene_colors[id]) || this._sceneColors[id] || null
+        ),
         last: st.state && st.state !== "unknown" ? new Date(st.state).getTime() || 0 : 0,
       });
     });
@@ -567,6 +578,15 @@ class HueLightsCard extends HTMLElement {
         ? (a, b) => b.last - a.last || a.name.localeCompare(b.name)
         : (a, b) => a.name.localeCompare(b.name);
     return out.sort(bySort).slice(0, c.max_scenes);
+  }
+
+  /** Filtre une palette : uniquement des couleurs hex, 3 max. Sinon null. */
+  _safeColors(cols) {
+    if (!Array.isArray(cols)) return null;
+    const ok = cols
+      .filter((x) => typeof x === "string" && /^#[0-9a-fA-F]{3,8}$/.test(x.trim()))
+      .slice(0, 3);
+    return ok.length ? ok : null;
   }
 
   _gradient(room) {
@@ -791,13 +811,18 @@ class HueLightsCard extends HTMLElement {
       norm(name)
         .replace(/[^a-z0-9]+/g, "_")
         .replace(/^_|_$/g, "") || `scene_${Date.now().toString(36)}`;
+    const targetId = `scene.${slug}`;
+    if (this._hass.states[targetId] && !window.confirm(
+      `Une scène « ${name} » existe déjà. La remplacer ?`
+    ))
+      return;
     this._hass.callService("scene", "create", {
       scene_id: slug,
       snapshot_entities: room.ids,
     });
     const fresh = this._room(room.key);
     if (fresh) {
-      this._sceneColors[`scene.${slug}`] = fresh.colors.slice(0, 3);
+      this._sceneColors[targetId] = fresh.colors.slice(0, 3);
       saveSceneColors(this._sceneColors);
     }
     this._showUndo(`Scène « ${name} » enregistrée`, null);
@@ -816,10 +841,14 @@ class HueLightsCard extends HTMLElement {
     const bar = t.querySelector(".bar");
     bar.style.transition = "none";
     bar.style.width = "100%";
-    requestAnimationFrame(() => {
-      bar.style.transition = `width ${this._config.undo_ms}ms linear`;
-      bar.style.width = "0%";
-    });
+    /* double rAF : la largeur initiale doit être peinte avant que la
+       transition ne s'applique, sinon les deux changements coalescent */
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        bar.style.transition = `width ${this._config.undo_ms}ms linear`;
+        bar.style.width = "0%";
+      })
+    );
     clearTimeout(this._undoTimer);
     this._undoTimer = setTimeout(() => this._hideUndo(), this._config.undo_ms);
   }
@@ -865,7 +894,13 @@ class HueLightsCard extends HTMLElement {
   /* ================= Mise à jour ================= */
 
   _update() {
-    if (!this._hass || !this._built || this._interacting) return;
+    if (!this._hass || !this._built) return;
+    /* une interaction en cours : différer, mais marquer sale pour ne
+       pas perdre la mise à jour quand le geste se termine */
+    if (this._interacting) {
+      this._dirty = true;
+      return;
+    }
     if (this._visible === false) return;
     /* diffère le rendu au prochain rafraîchissement d'écran */
     if (this._raf) cancelAnimationFrame(this._raf);
@@ -1097,6 +1132,12 @@ class HueLightsCard extends HTMLElement {
       dragging = false;
       armed = false;
       this._interacting = false;
+      /* le geste a été volé (scroll, notif…) : on repeint la valeur
+         réelle plutôt que de laisser la valeur draguée sans commit */
+      pct = room.pct;
+      paint();
+      this._dirty = true;
+      this._update();
     });
 
     /* Curseur dédié en disposition barres */
@@ -1147,6 +1188,10 @@ class HueLightsCard extends HTMLElement {
         slDrag = false;
         this._interacting = false;
         el.classList.remove("drag");
+        pct = room.pct;
+        paint();
+        this._dirty = true;
+        this._update();
       });
     }
   }
@@ -1263,6 +1308,8 @@ class HueLightsCard extends HTMLElement {
       sl.addEventListener("pointercancel", () => {
         sliding = false;
         this._interacting = false;
+        this._dirty = true;
+        this._update();
       });
     }
 
@@ -1331,7 +1378,10 @@ class HueLightsCard extends HTMLElement {
           this._toggle([id]);
           return;
         }
-        if (!c.show_color_picker) {
+        /* une prise ou une lampe tout-ou-rien n'a rien à faire
+           dans le sélecteur de couleur : on ouvre sa fiche */
+        const light = lights.find((l) => l.id === id);
+        if (!c.show_color_picker || light?.isSwitch) {
           fireEvent(this, "hass-more-info", { entityId: id });
           return;
         }
@@ -1568,6 +1618,8 @@ class HueLightsCard extends HTMLElement {
       ww.addEventListener("pointercancel", () => {
         drag = false;
         this._interacting = false;
+        this._dirty = true;
+        this._update();
       });
     }
 
@@ -1597,6 +1649,8 @@ class HueLightsCard extends HTMLElement {
       bs.addEventListener("pointercancel", () => {
         bd = false;
         this._interacting = false;
+        this._dirty = true;
+        this._update();
       });
     }
   }
@@ -2108,6 +2162,20 @@ class HueLightsCardEditor extends HTMLElement {
             .split(",")
             .map((s) => s.trim())
             .filter(Boolean);
+        /* un champ numérique vidé ne doit pas devenir 0 */
+        if (inp.type === "number" && (inp.value === "" || !Number.isFinite(v))) {
+          const def = { max_scenes: 12, scene_transition: 1 }[k];
+          if (def !== undefined) {
+            v = def;
+            inp.value = String(def);
+          }
+        }
+        if (inp.type === "number" && Number.isFinite(v)) {
+          const min = Number(inp.min);
+          const max = Number(inp.max);
+          if (Number.isFinite(min)) v = Math.max(min, v);
+          if (Number.isFinite(max)) v = Math.min(max, v);
+        }
         this._set(k, v);
       })
     );
