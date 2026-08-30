@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.7.2";
+const CARD_VERSION = "2.8.0";
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -307,6 +307,18 @@ class HueLightsCard extends HTMLElement {
         .filter(Boolean);
     if (typeof this._config.scene_match === "string")
       this._config.scene_match = this._config.scene_match.split(",").map((s) => s.trim());
+    /* aucun critère coché = aucune scène : on revient au défaut plutôt
+       que d'afficher « aucune trouvée » sans explication */
+    if (!Array.isArray(this._config.scene_match) || !this._config.scene_match.length)
+      this._config.scene_match = ["area", "group", "overlap"];
+    /* garde-fous sur les nombres venant du YAML : bornes saines */
+    const num = (v, min, max, def) =>
+      Number.isFinite(v) ? clamp(v, min, max) : def;
+    this._config.columns = num(this._config.columns, 1, 4, 2);
+    this._config.hold_ms = num(this._config.hold_ms, 120, 600, 220);
+    this._config.undo_ms = num(this._config.undo_ms, 1000, 60000, 5000);
+    this._config.max_scenes = num(this._config.max_scenes, 1, 30, 12);
+    this._config.scene_transition = num(this._config.scene_transition, 0, 10, 1);
     this._built = false;
     this._view = "grid";
     this._sig = "";
@@ -315,7 +327,25 @@ class HueLightsCard extends HTMLElement {
   }
 
   getCardSize() {
-    return 10;
+    /* estimation de hauteur en unités de 50 px, d'après le contenu réel */
+    if (!this._config) return 4;
+    const rooms = this._rooms ? this._rooms().length : 0;
+    if (!rooms) return 2;
+    if (this._config.layout === "rows") return 1 + rooms;
+    const cols = Math.max(1, Number(this._config.columns) || 2);
+    const rows = Math.ceil(rooms / cols);
+    return 1 + rows * 3; /* une tuile ≈ 124 px ≈ 3 unités */
+  }
+
+  /* dashboards modernes (sections) : la carte remira sa colonne */
+  getGridOptions() {
+    const rooms = this._rooms ? this._rooms().length : 0;
+    const cols = this._config?.layout === "rows" ? "full" : Math.max(1, Number(this._config?.columns) || 2);
+    return {
+      columns: cols === "full" ? 12 : cols * 2,
+      min_rows: 2,
+      max_rows: Math.max(3, Math.ceil((rooms || 4) / (cols === "full" ? 1 : cols)) * 3 + 1),
+    };
   }
 
   connectedCallback() {
@@ -555,7 +585,14 @@ class HueLightsCard extends HTMLElement {
       )
         ok = true;
       if (!ok && match.includes("overlap")) {
-        const targets = st.attributes?.entity_id || [];
+        /* une scène peut piloter l'entité groupe Hue (light.mon_groupe)
+           et non les ampoules membres : on résout les membres */
+        const targets = (st.attributes?.entity_id || []).flatMap((t) => {
+          const tst = hass.states[t];
+          const members =
+            tst?.attributes?.entity_id && tst.state !== undefined ? tst.attributes.entity_id : [];
+          return members.length ? members : [t];
+        });
         if (targets.some((t) => room.ids.includes(t))) ok = true;
       }
       if (!ok) return;
@@ -655,6 +692,7 @@ class HueLightsCard extends HTMLElement {
         brightness: st?.attributes?.brightness,
         hs_color: st?.attributes?.hs_color,
         color_temp_kelvin: st?.attributes?.color_temp_kelvin,
+        effect: !id.startsWith("switch.") ? st?.attributes?.effect : undefined,
       };
     });
   }
@@ -674,6 +712,7 @@ class HueLightsCard extends HTMLElement {
       if (s.brightness != null) data.brightness = s.brightness;
       if (s.hs_color) data.hs_color = s.hs_color;
       else if (s.color_temp_kelvin) data.color_temp_kelvin = s.color_temp_kelvin;
+      if (s.effect) data.effect = s.effect;
       this._hass.callService("light", "turn_on", data);
     });
     /* les extinctions sont envoyées en un seul appel par domaine */
@@ -752,13 +791,22 @@ class HueLightsCard extends HTMLElement {
     this._invalidate();
   }
 
-  _allOff() {
+  /** Interrupteur général : éteint les lampes allumées, ou allume tout. */
+  _allToggle() {
     const rooms = this._rooms().filter((r) => r.on);
-    if (!rooms.length) return;
-    const ids = rooms.flatMap((r) => r.onIds);
+    if (rooms.length) {
+      const ids = rooms.flatMap((r) => r.onIds);
+      const snap = this._snapshot(ids);
+      this._turn(ids, false);
+      this._showUndo("Toutes les lumières éteintes", () => this._restore(snap));
+      return;
+    }
+    /* tout est éteint : on allume toutes les lumières de la carte */
+    const ids = this._rooms().flatMap((r) => r.ids);
+    if (!ids.length) return;
     const snap = this._snapshot(ids);
-    this._turn(ids, false);
-    this._showUndo("Toutes les lumières éteintes", () => this._restore(snap));
+    this._turn(ids, true);
+    this._showUndo("Toutes les lumières allumées", () => this._restore(snap));
   }
 
   _activateScene(scene, room) {
@@ -800,14 +848,52 @@ class HueLightsCard extends HTMLElement {
     }, delay);
   }
 
+  /**
+   * Confirmation asynchrone façon Home Assistant : dialog de la carte
+   * (même style que l'enregistrement de scène), sans window.confirm
+   * bloquant. Retourne une Promise<boolean>.
+   */
+  _confirmHA(title, description, confirmText, destructive = false) {
+    return new Promise((resolve) => {
+      const card = this.shadowRoot.querySelector("ha-card");
+      if (!card) {
+        resolve(window.confirm(`${title}\n\n${description}`));
+        return;
+      }
+      const dlg = document.createElement("div");
+      dlg.className = "dlg confirm";
+      dlg.innerHTML = `<div class="dlgb">
+        <div class="dlgt">${esc(title)}</div>
+        <div class="dlgs">${esc(description)}</div>
+        <div class="dlga">
+          <div class="dlgbtn" data-cancel="1">Annuler</div>
+          <div class="dlgbtn pri ${destructive ? "destructive" : ""}" data-ok="1">${esc(confirmText)}</div>
+        </div></div>`;
+      card.appendChild(dlg);
+      const done = (val) => {
+        dlg.remove();
+        resolve(val);
+      };
+      dlg.querySelector("[data-cancel]").addEventListener("click", () => done(false));
+      dlg.addEventListener("click", (e) => e.target === dlg && done(false));
+      dlg.querySelector("[data-ok]").addEventListener("click", () => done(true));
+    });
+  }
+
   /** Suppression d'une scène créée par la carte. */
-  _confirmDeleteScene(id) {
+  async _confirmDeleteScene(id) {
     const name = this._hass.states[id]?.attributes?.friendly_name || id;
     if (!this._hass.services?.scene?.delete) {
       this._showUndo(`« ${name} » ne peut pas être supprimée depuis la carte`, null);
       return;
     }
-    if (!window.confirm(`Supprimer la scène « ${name} » ?`)) return;
+    const ok = await this._confirmHA(
+      "Supprimer la scène",
+      `La scène « ${name} » sera définitivement supprimée.`,
+      "Supprimer",
+      true
+    );
+    if (!ok) return;
     this._hass.callService("scene", "delete", { entity_id: id });
     delete this._sceneColors[id];
     saveSceneColors(this._sceneColors);
@@ -815,16 +901,20 @@ class HueLightsCard extends HTMLElement {
     this._update();
   }
 
-  _createScene(room, name) {
+  async _createScene(room, name) {
     const slug =
       norm(name)
         .replace(/[^a-z0-9]+/g, "_")
         .replace(/^_|_$/g, "") || `scene_${Date.now().toString(36)}`;
     const targetId = `scene.${slug}`;
-    if (this._hass.states[targetId] && !window.confirm(
-      `Une scène « ${name} » existe déjà. La remplacer ?`
-    ))
-      return;
+    if (this._hass.states[targetId]) {
+      const ok = await this._confirmHA(
+        "Scène existante",
+        `Une scène « ${name} » existe déjà. Voulez-vous la remplacer ?`,
+        "Remplacer"
+      );
+      if (!ok) return;
+    }
     this._hass.callService("scene", "create", {
       scene_id: slug,
       snapshot_entities: room.ids,
@@ -1016,7 +1106,7 @@ class HueLightsCard extends HTMLElement {
       c.layout === "tiles" ? `grid-template-columns:repeat(${c.columns},1fr)` : ""
     }">${shown.map((r) => this._roomHtml(r)).join("")}</div>`;
 
-    host.querySelector(".gsw")?.addEventListener("click", () => this._allOff());
+    host.querySelector(".gsw")?.addEventListener("click", () => this._allToggle());
     host.querySelectorAll("[data-k]").forEach((el) => {
       const room = shown.find((r) => r.key === el.dataset.k);
       if (room) this._bindTile(el, room);
@@ -1738,12 +1828,21 @@ class HueLightsCard extends HTMLElement {
 /* ================================================================== */
 
 HueLightsCard.styles = `
-:host{display:block;}
+:host{display:block;
+  /* thème : la carte hérite des couleurs de Home Assistant ; en thème
+     sombre non standard, ces replis restent lisibles sur les dégradés */
+  --hlc-bg:var(--card-background-color,#0e1014);
+  --hlc-text:var(--primary-text-color,#eef1f6);
+  --hlc-sub:var(--secondary-text-color,rgba(255,255,255,.4));
+  --hlc-border:var(--ha-card-border-color,rgba(255,255,255,.05));
+  --hlc-chipbg:color-mix(in srgb,var(--hlc-text) 7%,transparent);
+  --hlc-chipborder:color-mix(in srgb,var(--hlc-text) 12%,transparent);
+  --hlc-overlay:rgba(8,9,12,.82);}
 *{box-sizing:border-box;}
 ha-card{
   border-radius:var(--ha-card-border-radius,20px);
-  background:#0e1014;border:1px solid rgba(255,255,255,.05);
-  padding:16px 14px 14px;color:#eef1f6;position:relative;overflow:hidden;
+  background:var(--hlc-bg);border:1px solid var(--hlc-border);
+  padding:16px 14px 14px;color:var(--hlc-text);position:relative;overflow:hidden;
   font-family:var(--primary-font-family,"Inter","Segoe UI",Roboto,sans-serif);
 }
 /* mode transparent : fond et bordure invisibles, aucune marge intérieure */
@@ -1756,12 +1855,12 @@ ha-card.transparent .toast{left:0;right:0;bottom:0;}
 /* ---- en-tête grille ---- */
 .hd{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:2px 4px 0;}
 .h1{font-size:22px;font-weight:700;letter-spacing:-.5px;}
-.h2{font-size:11px;color:rgba(255,255,255,.4);margin-top:4px;}
+.h2{font-size:11px;color:var(--hlc-sub);margin-top:4px;}
 .gsw{width:48px;height:28px;border-radius:15px;flex-shrink:0;cursor:pointer;
-  background:rgba(255,255,255,.12);position:relative;transition:.2s;}
+  background:var(--hlc-chipbg);border:1px solid var(--hlc-chipborder);position:relative;transition:.2s;}
 .gsw i{position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;
-  background:rgba(255,255,255,.55);transition:.2s;}
-.gsw.on{background:#3b82f6;} .gsw.on i{left:23px;background:#fff;}
+  background:color-mix(in srgb,var(--hlc-text) 55%,transparent);transition:.2s;}
+.gsw.on{background:var(--primary-color,#3b82f6);border-color:transparent;} .gsw.on i{left:23px;background:#fff;}
 
 .body{margin-top:15px;}
 .body.tiles{display:grid;gap:8px;}
@@ -1863,18 +1962,18 @@ ha-card.transparent .toast{left:0;right:0;bottom:0;}
 .rknob{position:absolute;top:50%;transform:translate(-50%,-50%);width:20px;height:20px;
   border-radius:50%;background:#fff;box-shadow:0 2px 8px rgba(0,0,0,.45);}
 .rsec{font-size:9px;letter-spacing:1.8px;text-transform:uppercase;
-  color:rgba(255,255,255,.34);font-weight:700;margin:18px 0 9px;padding-left:3px;}
+  color:var(--hlc-sub);font-weight:700;margin:18px 0 9px;padding-left:3px;}
 .rsec.rowsec{display:flex;align-items:center;gap:7px;flex-wrap:wrap;}
 .rsec.rowsec > span:first-child{flex:1;}
 .pill2{font-size:10.5px;font-weight:600;padding:6px 12px;border-radius:14px;cursor:pointer;
-  background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);
-  color:rgba(255,255,255,.65);text-transform:none;letter-spacing:0;transition:.15s;}
-.pill2:hover{background:rgba(255,255,255,.13);color:#eef1f6;}
-.pill2.on{background:#fff;color:#12151c;border-color:#fff;}
+  background:var(--hlc-chipbg);border:1px solid var(--hlc-chipborder);
+  color:var(--hlc-text);text-transform:none;letter-spacing:0;transition:.15s;opacity:.85;}
+.pill2:hover{opacity:1;}
+.pill2.on{background:var(--hlc-text);color:var(--hlc-bg);border-color:transparent;opacity:1;}
 .scenes{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;}
-.scn{position:relative;background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.06);
+.scn{position:relative;background:var(--hlc-chipbg);border:1px solid var(--hlc-chipborder);
   border-radius:15px;padding:13px 6px 11px;text-align:center;cursor:pointer;transition:.15s;}
-.scn:hover{background:rgba(255,255,255,.09);}
+.scn:hover{background:color-mix(in srgb,var(--hlc-text) 9%,transparent);}
 .scn.press{transform:scale(.94);transition:transform .55s ease-out;}
 .scn .scdot{transition:transform .2s;}
 .sdot,.scdot{width:50px;height:50px;border-radius:50%;margin:0 auto;
@@ -1916,11 +2015,13 @@ ha-card.transparent .toast{left:0;right:0;bottom:0;}
 
 /* ---- vue couleur ---- */
 .cptop{display:flex;align-items:center;gap:9px;padding:2px 2px 0;}
-.cpb{padding:9px 15px;border-radius:20px;background:rgba(255,255,255,.09);
-  font-size:12px;font-weight:600;cursor:pointer;color:rgba(255,255,255,.8);
+.cpb{padding:9px 15px;border-radius:20px;background:var(--hlc-chipbg);
+  border:1px solid var(--hlc-chipborder);
+  font-size:12px;font-weight:600;cursor:pointer;color:var(--hlc-text);opacity:.85;
   display:flex;align-items:center;}
+.cpb:hover{opacity:1;}
 .cpb.right{margin-left:auto;}
-.cptitle{font-size:12px;font-weight:600;color:rgba(255,255,255,.75);
+.cptitle{font-size:12px;font-weight:600;color:var(--hlc-text);opacity:.75;
   text-align:center;margin-top:8px;}
 .wheelw{position:relative;width:100%;max-width:270px;aspect-ratio:1;margin:18px auto 0;
   touch-action:none;}
@@ -1943,11 +2044,11 @@ ha-card.transparent .toast{left:0;right:0;bottom:0;}
 .pin .pi{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
   padding-bottom:9px;}
 .pin .pi svg{width:16px;height:16px;fill:#fff;}
-.cp-no-color{padding:40px 20px;text-align:center;color:rgba(255,255,255,.4);
-  font-size:13px;background:rgba(255,255,255,.04);border-radius:18px;margin:18px auto;
+.cp-no-color{padding:40px 20px;text-align:center;color:var(--hlc-sub);
+  font-size:13px;background:var(--hlc-chipbg);border-radius:18px;margin:18px auto;
   max-width:270px;}
 .cpmodes{display:flex;align-items:center;gap:10px;margin-top:20px;}
-.mchips{display:flex;gap:9px;align-items:center;background:rgba(255,255,255,.07);
+.mchips{display:flex;gap:9px;align-items:center;background:var(--hlc-chipbg);
   border-radius:22px;padding:7px 11px;}
 .mc{width:30px;height:30px;border-radius:50%;cursor:pointer;border:2px solid transparent;
   transition:.15s;}
@@ -1959,12 +2060,13 @@ ha-card.transparent .toast{left:0;right:0;bottom:0;}
 .cpbr{margin-left:auto;text-align:right;}
 .cpbrv{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;}
 .cpbrs{position:relative;width:104px;height:34px;border-radius:18px;margin-top:6px;
-  background:rgba(255,255,255,.12);overflow:hidden;cursor:pointer;touch-action:none;}
-.cpbrf{position:absolute;left:0;top:0;bottom:0;background:rgba(255,255,255,.55);}
+  background:var(--hlc-chipbg);overflow:hidden;cursor:pointer;touch-action:none;
+  border:1px solid var(--hlc-chipborder);}
+.cpbrf{position:absolute;left:0;top:0;bottom:0;background:color-mix(in srgb,var(--hlc-text) 45%,transparent);}
 .cpbrs svg{position:absolute;top:50%;right:11px;transform:translateY(-50%);
-  width:16px;height:16px;fill:none;}
+  width:16px;height:16px;fill:none;stroke:var(--hlc-text);}
 .cpsel{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:20px;}
-.cpsl{font-size:10.5px;color:rgba(255,255,255,.5);}
+.cpsl{font-size:10.5px;color:var(--hlc-sub);}
 .cplights{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:9px;}
 .cpl{position:relative;border-radius:15px;overflow:hidden;
   min-height:112px;cursor:pointer;border:2px solid transparent;
@@ -1983,31 +2085,34 @@ ha-card.transparent .toast{left:0;right:0;bottom:0;}
 .dlg{position:absolute;inset:0;z-index:40;display:flex;align-items:center;
   justify-content:center;padding:18px;background:rgba(6,7,10,.72);
   backdrop-filter:blur(3px);}
-.dlgb{width:100%;background:#1b1f27;border:1px solid rgba(255,255,255,.14);
-  border-radius:18px;padding:16px;box-shadow:0 20px 50px rgba(0,0,0,.6);}
+.dlgb{width:100%;background:var(--hlc-bg);border:1px solid var(--hlc-chipborder);
+  border-radius:18px;padding:16px;box-shadow:0 20px 50px rgba(0,0,0,.6);color:var(--hlc-text);}
 .dlgt{font-size:14px;font-weight:600;}
-.dlgs{font-size:10.5px;color:rgba(255,255,255,.45);margin-top:4px;line-height:1.5;}
+.dlgs{font-size:10.5px;color:var(--hlc-sub);margin-top:4px;line-height:1.5;}
 .dlgp{display:flex;gap:4px;margin-top:13px;}
 .dlgp i{flex:1;height:34px;border-radius:8px;}
 .dlgi{width:100%;margin-top:13px;padding:11px 12px;border-radius:11px;font-size:13px;
-  background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.16);
-  color:#eef1f6;font-family:inherit;outline:none;}
+  background:var(--hlc-chipbg);border:1px solid var(--hlc-chipborder);
+  color:var(--hlc-text);font-family:inherit;outline:none;}
+.dlgi:focus{border-color:var(--primary-color,#3b82f6);}
 .dlga{display:flex;gap:8px;margin-top:14px;}
 .dlgbtn{flex:1;text-align:center;font-size:12.5px;font-weight:600;padding:11px 0;
-  border-radius:12px;cursor:pointer;background:rgba(255,255,255,.06);
-  border:1px solid rgba(255,255,255,.1);color:rgba(255,255,255,.6);}
-.dlgbtn.pri{background:#fff;color:#12151c;border-color:#fff;}
+  border-radius:12px;cursor:pointer;background:var(--hlc-chipbg);
+  border:1px solid var(--hlc-chipborder);color:var(--hlc-text);opacity:.75;}
+.dlgbtn:hover{opacity:1;}
+.dlgbtn.pri{background:var(--hlc-text);color:var(--hlc-bg);border-color:transparent;opacity:1;}
+.dlgbtn.pri.destructive{background:var(--error-color,#f44336);color:#fff;border-color:transparent;}
 
 /* ---- bandeau d'annulation ---- */
-.toast{position:absolute;left:14px;right:14px;bottom:12px;background:#1c2029;
-  border:1px solid rgba(255,255,255,.14);border-radius:14px;padding:11px 14px;
+.toast{position:absolute;left:14px;right:14px;bottom:12px;background:var(--hlc-bg);
+  border:1px solid var(--hlc-chipborder);border-radius:14px;padding:11px 14px;
   display:flex;align-items:center;gap:14px;z-index:30;overflow:hidden;
   box-shadow:0 12px 34px rgba(0,0,0,.6);opacity:0;transform:translateY(70px);
-  transition:.25s;pointer-events:none;}
+  transition:.25s;pointer-events:none;color:var(--hlc-text);}
 .toast.show{opacity:1;transform:translateY(0);pointer-events:auto;}
 .toast .tt{flex:1;font-size:12px;}
-.toast .tu{font-size:12px;font-weight:700;color:#7fb3ff;cursor:pointer;flex-shrink:0;}
-.toast .bar{position:absolute;left:0;bottom:0;height:2px;background:#7fb3ff;width:100%;}
+.toast .tu{font-size:12px;font-weight:700;color:var(--primary-color,#7fb3ff);cursor:pointer;flex-shrink:0;}
+.toast .bar{position:absolute;left:0;bottom:0;height:2px;background:var(--primary-color,#7fb3ff);width:100%;}
 `;
 
 /* ================================================================== */
@@ -2454,11 +2559,14 @@ if (!customElements.get("hue-lights-card-editor"))
   customElements.define("hue-lights-card-editor", HueLightsCardEditor);
 
 window.customCards = window.customCards || [];
-window.customCards.push({
-  type: "hue-lights-card",
-  name: "Hue Lights Card",
-  description:
-    "Pièces en dégradé façon Hue, scènes réelles, sélecteur de couleur multi-lampes et garde-fous.",
-  preview: true,
-  documentationURL: "https://github.com/junkoku38/hue-lights-card",
-});
+/* pas de doublon si le bundle est chargé deux fois (cache + rechargement) */
+if (!window.customCards.some((c) => c?.type === "hue-lights-card")) {
+  window.customCards.push({
+    type: "hue-lights-card",
+    name: "Hue Lights Card",
+    description:
+      "Pièces en dégradé façon Hue, scènes réelles, sélecteur de couleur multi-lampes et garde-fous.",
+    preview: true,
+    documentationURL: "https://github.com/junkoku38/hue-lights-card",
+  });
+}

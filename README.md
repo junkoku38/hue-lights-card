@@ -91,21 +91,26 @@ Avec `group_by_area: false`, chaque lampe est sa propre tuile (pas de regroupeme
 |---|---|---|---|
 | `name` | string | `Lumières` | Titre de la carte |
 | `layout` | `tiles` \| `rows` | `tiles` | Vignettes en grille ou barres horizontales |
-| `columns` | number | `2` | Colonnes en mode `tiles` |
+| `columns` | number | `2` | Colonnes en mode `tiles` (1 à 4) |
+| `sort` | `auto` \| `manual` | `auto` | Ordre des tuiles ; `manual` suit `order` |
+| `order` | list | `null` | Ordre manuel des entités (mode `manual`) |
 | `show_header` | bool | `true` | En-tête avec interrupteur général |
 | `show_off` | bool | `true` | Afficher les pièces éteintes |
 | `show_unassigned` | bool | `false` | Lumières sans pièce assignée |
+| `transparent` | bool | `false` | Fond et bordure invisibles, vignettes seules |
 | `gesture` | string | `horizontal` | Geste de réglage de l'intensité |
-| `hold_ms` | number | `220` | Durée d'appui long en mode `vertical_hold` |
+| `hold_ms` | number | `220` | Durée d'appui long en mode `vertical_hold` (120–600) |
 | `tap_action` | `open` \| `toggle` | `open` | Appui court sur la surface |
 | `guard_scroll` | bool | `true` | Annuler si la page a défilé |
 | `guard_thresholds` | bool | `true` | Seuils de mouvement (10 px) et durée (60 ms) |
 | `undo` | bool | `true` | Bandeau d'annulation |
-| `undo_ms` | number | `5000` | Durée d'affichage du bandeau |
+| `undo_ms` | number | `5000` | Durée d'affichage du bandeau (1000–60000) |
 | `show_scenes` | bool | `true` | Découvrir et afficher les scènes |
-| `scene_match` | list | `["area","group","overlap"]` | Critères de rattachement |
-| `max_scenes` | number | `12` | Nombre max de scènes par pièce |
-| `scene_transition` | number | `1` | Transition en secondes |
+| `scene_match` | list | `["area","group","overlap"]` | Critères de rattachement (vide = défaut) |
+| `scene_sort` | `name` \| `recent` | `name` | Tri alphabétique stable ou dernière utilisée |
+| `scene_colors` | map | `null` | Palettes forcées : `{ "scene.x": ["#...", ...] }` (3 couleurs) |
+| `max_scenes` | number | `12` | Nombre max de scènes par pièce (1–30) |
+| `scene_transition` | number | `1` | Transition en secondes (0–10) |
 | `allow_scene_create` | bool | `true` | Enregistrement de scènes |
 | `learn_scene_colors` | bool | `true` | Mémoriser les couleurs des scènes |
 | `show_color_picker` | bool | `true` | Sélecteur de couleur |
@@ -113,6 +118,10 @@ Avec `group_by_area: false`, chaque lampe est sa propre tuile (pas de regroupeme
 | `areas` | list | `null` | Filtrer par area ID ou nom |
 | `entities` | list | `null` | Liste explicite d'entity_id (désactive la découverte auto) |
 | `group_by_area` | bool | `true` | Regrouper par pièce (false : une tuile par lampe) |
+
+L'interrupteur général de l'en-tête est bidirectionnel : il éteint les
+lumières allumées, ou rallume tout lorsque la carte est éteinte. La carte
+suit le thème de Home Assistant (clair ou sombre).
 
 ## Navigation
 
