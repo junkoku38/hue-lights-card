@@ -13,7 +13,7 @@
  * https://github.com/junkoku38/hue-lights-card
  */
 
-const CARD_VERSION = "2.7.1";
+const CARD_VERSION = "2.7.2";
 
 console.info(
   `%c HUE-LIGHTS-CARD %c v${CARD_VERSION} `,
@@ -580,11 +580,17 @@ class HueLightsCard extends HTMLElement {
     return out.sort(bySort).slice(0, c.max_scenes);
   }
 
-  /** Filtre une palette : uniquement des couleurs hex, 3 max. Sinon null. */
+  /** Filtre une palette : uniquement hex ou rgb() numériques, 3 max. */
   _safeColors(cols) {
     if (!Array.isArray(cols)) return null;
     const ok = cols
-      .filter((x) => typeof x === "string" && /^#[0-9a-fA-F]{3,8}$/.test(x.trim()))
+      .filter((x) => typeof x === "string")
+      .map((x) => x.trim())
+      .filter(
+        (x) =>
+          /^#[0-9a-fA-F]{3,8}$/.test(x) ||
+          /^rgb\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\)$/.test(x)
+      )
       .slice(0, 3);
     return ok.length ? ok : null;
   }
@@ -654,9 +660,10 @@ class HueLightsCard extends HTMLElement {
   }
 
   _restore(snap) {
+    const offs = [];
     snap.forEach((s) => {
       if (s.state !== "on") {
-        this._turn([s.id], false);
+        offs.push(s.id);
         return;
       }
       if (s.id.startsWith("switch.")) {
@@ -669,6 +676,8 @@ class HueLightsCard extends HTMLElement {
       else if (s.color_temp_kelvin) data.color_temp_kelvin = s.color_temp_kelvin;
       this._hass.callService("light", "turn_on", data);
     });
+    /* les extinctions sont envoyées en un seul appel par domaine */
+    if (offs.length) this._turn(offs, false);
     this._invalidate();
   }
 
@@ -916,7 +925,14 @@ class HueLightsCard extends HTMLElement {
     sig += rooms.map((r) => `${r.key}:${r.on}:${r.pct}:${r.colors.join()}`).join("|");
     if (this._view !== "grid") {
       const room = rooms.find((r) => r.key === this._roomKey) || null;
-      if (room) sig += "|" + this._scenes(room).map((s) => s.id + (s.colors || "")).join();
+      if (room) {
+        /* signature fine : état et couleur de chaque lampe, scènes
+           comprises — une 4e lampe qui change déclenche bien le rendu */
+        sig +=
+          "|" +
+          room.flatLights.map((l) => `${l.id}:${l.on}:${l.pct}:${l.color}`).join(";");
+        sig += "|" + this._scenes(room).map((s) => s.id + (s.colors || "")).join();
+      }
     }
     if (sig === this._sig) return;
     this._sig = sig;
@@ -1308,6 +1324,9 @@ class HueLightsCard extends HTMLElement {
       sl.addEventListener("pointercancel", () => {
         sliding = false;
         this._interacting = false;
+        /* repeindre la valeur réelle plutôt que la position annulée */
+        host.querySelector(".rfill").style.width = `${room.pct}%`;
+        host.querySelector(".rknob").style.left = `${room.pct}%`;
         this._dirty = true;
         this._update();
       });
@@ -1618,6 +1637,12 @@ class HueLightsCard extends HTMLElement {
       ww.addEventListener("pointercancel", () => {
         drag = false;
         this._interacting = false;
+        /* geste annulé : on repeint la position réelle de la lampe
+           et on ne garde pas la position draguée en mémoire */
+        curH = rh;
+        curS = rs;
+        place();
+        this._lastColor = null;
         this._dirty = true;
         this._update();
       });
@@ -1649,6 +1674,9 @@ class HueLightsCard extends HTMLElement {
       bs.addEventListener("pointercancel", () => {
         bd = false;
         this._interacting = false;
+        /* repeindre la valeur réelle du groupe sélectionné */
+        host.querySelector(".cpbrf").style.width = `${avg}%`;
+        host.querySelector(".cpbrv").textContent = `${avg} %`;
         this._dirty = true;
         this._update();
       });
@@ -1849,10 +1877,10 @@ ha-card.transparent .toast{left:0;right:0;bottom:0;}
 .scn:hover{background:rgba(255,255,255,.09);}
 .scn.press{transform:scale(.94);transition:transform .55s ease-out;}
 .scn .scdot{transition:transform .2s;}
-.sdot{width:50px;height:50px;border-radius:50%;margin:0 auto;
+.sdot,.scdot{width:50px;height:50px;border-radius:50%;margin:0 auto;
   display:flex;align-items:center;justify-content:center;
   box-shadow:0 4px 14px rgba(0,0,0,.4);}
-.sdot svg{width:24px;height:24px;}
+.sdot svg,.scdot svg{width:24px;height:24px;}
 .scn b{display:block;font-size:10.5px;font-weight:600;margin-top:8px;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .scn .dyn{display:block;font-style:normal;font-size:8px;letter-spacing:.6px;
@@ -2256,7 +2284,9 @@ class HueLightsCardEditor extends HTMLElement {
     );
     sr.querySelector(".cols").style.display = c.layout === "tiles" ? "" : "none";
     sr.querySelector(".hold").style.display = c.gesture === "vertical_hold" ? "" : "none";
-    sr.querySelector(".scmatch").style.display = c.show_scenes ? "" : "none";
+    sr.querySelectorAll(".scmatch").forEach((g) => {
+      g.style.display = c.show_scenes ? "" : "none";
+    });
     sr.querySelector("#ghint").textContent = {
       horizontal: "Le doigt vertical reste au défilement de la page : aucun conflit.",
       vertical_hold: "Maintenir arme la surface, puis le glissement vertical règle l'intensité.",
